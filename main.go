@@ -11,6 +11,7 @@ import (
 
 	"github.com/daniel-widrick/GraceNoteScraper/guide"
 	"github.com/daniel-widrick/GraceNoteScraper/tmdb"
+	"github.com/daniel-widrick/GraceNoteScraper/tvlogo"
 	"github.com/daniel-widrick/GraceNoteScraper/util"
 	"github.com/daniel-widrick/GraceNoteScraper/web"
 	"github.com/joho/godotenv"
@@ -32,6 +33,14 @@ func main() {
 		log.Println("No TMDB token configured, skipping image enrichment")
 	}
 	defer tmdbClient.Close()
+
+	logoClient := tvlogo.NewClient(country, "tvlogo_cache.json")
+	if logoClient != nil {
+		log.Println("TV logo enrichment enabled")
+	} else {
+		log.Printf("TV logo enrichment not available for country %s", country)
+	}
+	defer logoClient.Close()
 
 	client := web.NewClient()
 
@@ -85,6 +94,7 @@ func main() {
 		channels = append(channels, ch)
 	}
 
+	enrichChannelIcons(logoClient, channels)
 	enrichProgramThumbnails(tmdbClient, programs)
 
 	tvGuide := guide.TVGuide{
@@ -119,7 +129,7 @@ func xmlEscape(s string) string {
 	return s
 }
 
-// enrichProgramThumbnails replaces broken Gracenote thumbnail URLs with TMDB
+// replaces broken Gracenote thumbnail URLs with TMDB
 // poster images, star ratings, dates, and descriptions.
 func enrichProgramThumbnails(client *tmdb.Client, programs []guide.Program) {
 	if client == nil {
@@ -210,4 +220,28 @@ func enrichProgramThumbnails(client *tmdb.Client, programs []guide.Program) {
 	}
 
 	log.Printf("TMDB: enriched %d/%d programs", enriched, len(programs))
+}
+
+// resolves channel logos from the tv-logo/tv-logos repo,
+// replacing dead Gracenote icon URLs with verified GitHub-hosted PNGs.
+func enrichChannelIcons(client *tvlogo.Client, channels []guide.Channel) {
+	if client == nil {
+		return
+	}
+
+	log.Printf("TV logos: resolving icons for %d channels", len(channels))
+
+	enriched := 0
+	for i := range channels {
+		logoURL := client.Resolve(channels[i].ID, channels[i].CallSign, channels[i].Affiliate)
+		if logoURL != "" {
+			channels[i].IconURL = logoURL
+			enriched++
+		} else {
+			// Clear dead zap2it URL — no icon is better than a broken one
+			channels[i].IconURL = ""
+		}
+	}
+
+	log.Printf("TV logos: enriched %d/%d channels", enriched, len(channels))
 }

@@ -57,7 +57,7 @@ func (c *Client) Close() {
 	c.cache.Save() //save cache to disk
 }
 
-// Lookup checks the cache first, then calls the TMDB search API.
+// checks the cache first, then calls the TMDB search API.
 // Returns a CacheEntry with image URL, rating, year, and overview.
 func (c *Client) Lookup(title string, isMovie bool) CacheEntry {
 	if c == nil {

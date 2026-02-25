@@ -2,3 +2,4 @@
 .env
 *.xmltv
 tmdb_cache.json
+tvlogo_cache.json

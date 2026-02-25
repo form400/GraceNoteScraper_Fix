@@ -18,6 +18,8 @@ type Channel struct {
 	ID           string
 	DisplayNames []DisplayName
 	IconURL      string
+	CallSign     string // internal, not in template
+	Affiliate    string // internal, not in template
 }
 
 type DisplayName struct {
@@ -74,7 +76,7 @@ type Subtitle struct {
 	Type string
 }
 
-// xmlEscape escapes &, <, > for safe XML text content.
+// escapes &, <, > for safe XML text content.
 func xmlEscape(s string) string {
 	s = strings.ReplaceAll(s, "&", "&amp;")
 	s = strings.ReplaceAll(s, "<", "&lt;")
@@ -82,7 +84,7 @@ func xmlEscape(s string) string {
 	return s
 }
 
-// formatXMLTVTime converts "2025-08-06T02:00:00Z" to "20250806020000 +0000"
+// converts "2025-08-06T02:00:00Z" to "20250806020000 +0000"
 func formatXMLTVTime(iso string) string {
 	s := iso
 	s = strings.ReplaceAll(s, "-", "")
@@ -92,7 +94,7 @@ func formatXMLTVTime(iso string) string {
 	return s
 }
 
-// ConvertChannel converts a JSON channel to a template Channel struct.
+// converts a JSON channel to a template Channel struct.
 func ConvertChannel(ch web.JSONChannel) Channel {
 	// Build icon URL: strip leading slashes, strip query params, prepend http://
 	iconURL := ""
@@ -116,11 +118,13 @@ func ConvertChannel(ch web.JSONChannel) Channel {
 			{Name: xmlEscape(ch.CallSign)},
 			{Name: xmlEscape(titleCase(ch.AffiliateName))},
 		},
-		IconURL: iconURL,
+		IconURL:   iconURL,
+		CallSign:  ch.CallSign,
+		Affiliate: ch.AffiliateName,
 	}
 }
 
-// ConvertEvent converts a JSON event to a template Program struct.
+// converts a JSON event to a template Program struct.
 func ConvertEvent(ev web.JSONEvent, channelID, lang, country string) Program {
 	season := 0
 	episode := 0
@@ -271,7 +275,7 @@ func ConvertEvent(ev web.JSONEvent, channelID, lang, country string) Program {
 	return p
 }
 
-// titleCase uppercases the first letter of each word (simple replacement for deprecated strings.Title).
+// uppercases the first letter of each word (simple replacement for deprecated strings.Title).
 func titleCase(s string) string {
 	prev := ' '
 	return strings.Map(func(r rune) rune {
