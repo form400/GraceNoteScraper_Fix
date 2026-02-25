@@ -1,0 +1,54 @@
+<?xml version="1.0" ?>
+<!DOCTYPE tv SYSTEM 'xmltv.dtd'>
+<tv source-info="http://tvlistings.gracenote.com/" source-info-name="GraceNote" generator-info-name="GraceNoteScraper">
+{{- range .Channels }}
+  <channel id="{{ .ID }}">
+    {{- range .DisplayNames }}
+    <display-name>{{ .Name }}</display-name>
+    {{- end }}
+    <icon src="{{ .IconURL }}" />
+  </channel>
+{{- end }}
+{{- range .Programs }}
+  <programme start="{{ .Start }}" stop="{{ .Stop }}" channel="{{ .Channel }}">
+    <title lang="{{ .Lang }}">{{ .Title }}</title>
+    {{- if .SubTitle }}
+    <sub-title lang="{{ .Lang }}">{{ .SubTitle }}</sub-title>
+    {{- end }}
+    <desc lang="{{ .Lang }}">{{ .Description }}</desc>
+    <length units="{{ .LengthUnits }}">{{ .Length }}</length>
+    {{- if .Language }}
+    <language>{{ .Language }}</language>
+    {{- end }}
+    {{- if .Thumbnail }}
+    <thumbnail>{{ .Thumbnail }}</thumbnail>
+    <icon src="{{ .Thumbnail }}"/>
+    {{- end }}
+    <url>{{ .URL }}</url>
+    {{- if .Country }}
+    <country>{{ .Country }}</country>
+    {{- end }}
+    {{- range .EpisodeNumbers }}
+    <episode-num system="{{ .System }}">{{ .EpisodeNumber }}</episode-num>
+    {{- end }}
+    {{- range .Categories }}
+    <category lang="{{ .Lang }}">{{ .Name }}</category>
+    {{- end }}
+    {{- if .New }}
+    <new />
+    {{- end }}
+    {{- if .Premiere }}
+    <premiere />
+    {{- end }}
+    {{- if .PreviouslyShown }}
+    <previously-shown />
+    {{- end }}
+    {{- range .Subtitles }}
+    <subtitles type="{{ .Type }}" />
+    {{- end }}
+    {{- if .Rating }}
+    <rating{{ if .RatingSystem }} system="{{ .RatingSystem }}"{{ end }}><value>{{ .Rating }}</value></rating>
+    {{- end }}
+  </programme>
+{{- end }}
+</tv>
