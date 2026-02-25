@@ -1,0 +1,9 @@
+*.exe
+*.xmltv
+.env
+image_cache/
+tmdb_cache.json
+tvlogo_cache.json
+guide_cache.json
+demo.gif
+README.md

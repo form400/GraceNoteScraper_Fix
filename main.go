@@ -194,7 +194,7 @@ func runScrape(tmdbClient *tmdb.Client, logoClient *tvlogo.Client, lang, country
 
 	now := time.Now().UTC()
 	midnight := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
-	endTime := midnight.Add(time.Hour * 24)
+	endTime := midnight.Add(14 * 24 * time.Hour)
 
 	channelMap := make(map[string]guide.Channel)
 	eventMap := make(map[string]bool)
