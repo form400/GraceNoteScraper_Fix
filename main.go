@@ -2,13 +2,17 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
 	"embed"
+	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"html"
+	"io"
 	"log"
 	"net/http"
+	neturl "net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -69,14 +73,15 @@ type APIChannel struct {
 }
 
 type APIProgram struct {
-	Title    string `json:"title"`
-	SubTitle string `json:"subTitle,omitempty"`
-	Start    string `json:"start"`
-	End      string `json:"end"`
-	Category string `json:"category,omitempty"`
-	IsNew    bool   `json:"isNew,omitempty"`
-	Rating   string `json:"rating,omitempty"`
-	IconURL  string `json:"iconUrl,omitempty"`
+	Title       string `json:"title"`
+	SubTitle    string `json:"subTitle,omitempty"`
+	Start       string `json:"start"`
+	End         string `json:"end"`
+	Category    string `json:"category,omitempty"`
+	IsNew       bool   `json:"isNew,omitempty"`
+	Rating      string `json:"rating,omitempty"`
+	IconURL     string `json:"iconUrl,omitempty"`
+	Description string `json:"description,omitempty"`
 }
 
 // ---------- Conversion ----------
@@ -90,15 +95,24 @@ func guideToJSON(g *guide.TVGuide) APIGuide {
 		if len(p.Categories) > 0 {
 			cat = p.Categories[0].Name
 		}
+		desc := html.UnescapeString(p.Description)
+		if desc == "Unavailable" {
+			desc = ""
+		}
+		iconURL := p.IconSrc
+		if iconURL != "" {
+			iconURL = "/img?url=" + neturl.QueryEscape(iconURL)
+		}
 		ap := APIProgram{
-			Title:    html.UnescapeString(p.Title),
-			SubTitle: html.UnescapeString(p.SubTitle),
-			Start:    xmltvTimeToISO(p.Start),
-			End:      xmltvTimeToISO(p.Stop),
-			Category: cat,
-			IsNew:    p.New,
-			Rating:   p.Rating,
-			IconURL:  p.IconSrc,
+			Title:       html.UnescapeString(p.Title),
+			SubTitle:    html.UnescapeString(p.SubTitle),
+			Start:       xmltvTimeToISO(p.Start),
+			End:         xmltvTimeToISO(p.Stop),
+			Category:    cat,
+			IsNew:       p.New,
+			Rating:      p.Rating,
+			IconURL:     iconURL,
+			Description: desc,
 		}
 		chanProgs[p.Channel] = append(chanProgs[p.Channel], ap)
 	}
@@ -121,11 +135,15 @@ func guideToJSON(g *guide.TVGuide) APIGuide {
 		} else if len(ch.DisplayNames) >= 1 {
 			name = ch.DisplayNames[0].Name
 		}
+		logoURL := ch.IconURL
+		if logoURL != "" {
+			logoURL = "/img?url=" + neturl.QueryEscape(logoURL)
+		}
 		channels = append(channels, APIChannel{
 			ID:       ch.ID,
 			Number:   html.UnescapeString(number),
 			Name:     html.UnescapeString(name),
-			LogoURL:  ch.IconURL,
+			LogoURL:  logoURL,
 			Programs: chanProgs[ch.ID],
 		})
 	}
@@ -400,6 +418,89 @@ func handleGuideJSON(state *GuideState) http.HandlerFunc {
 	}
 }
 
+// ---------- Image proxy ----------
+
+const imageCacheDir = "image_cache"
+
+// imageURLAllowed checks whether a URL is on the proxy allowlist.
+func imageURLAllowed(rawURL string) bool {
+	u, err := neturl.Parse(rawURL)
+	if err != nil {
+		return false
+	}
+	host := strings.ToLower(u.Host)
+	if host == "image.tmdb.org" {
+		return true
+	}
+	if host == "raw.githubusercontent.com" && strings.HasPrefix(u.Path, "/tv-logo") {
+		return true
+	}
+	return false
+}
+
+func handleImage(w http.ResponseWriter, r *http.Request) {
+	rawURL := r.URL.Query().Get("url")
+	if rawURL == "" {
+		http.Error(w, "missing url parameter", http.StatusBadRequest)
+		return
+	}
+	if !imageURLAllowed(rawURL) {
+		http.Error(w, "url not allowed", http.StatusForbidden)
+		return
+	}
+
+	// Cache key
+	h := sha256.Sum256([]byte(rawURL))
+	key := hex.EncodeToString(h[:])
+	datPath := filepath.Join(imageCacheDir, key+".dat")
+	typePath := filepath.Join(imageCacheDir, key+".type")
+
+	// Cache hit
+	if ct, err := os.ReadFile(typePath); err == nil {
+		w.Header().Set("Content-Type", string(ct))
+		w.Header().Set("Cache-Control", "public, max-age=86400")
+		http.ServeFile(w, r, datPath)
+		return
+	}
+
+	// Cache miss — fetch upstream
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Get(rawURL)
+	if err != nil {
+		http.Error(w, "upstream fetch failed", http.StatusBadGateway)
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		http.Error(w, "upstream returned "+resp.Status, http.StatusBadGateway)
+		return
+	}
+
+	// Ensure cache dir
+	os.MkdirAll(imageCacheDir, 0755)
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		http.Error(w, "failed reading upstream", http.StatusBadGateway)
+		return
+	}
+
+	contentType := resp.Header.Get("Content-Type")
+	if contentType == "" {
+		contentType = "application/octet-stream"
+	}
+
+	// Write cache files (best-effort)
+	os.WriteFile(datPath, body, 0644)
+	os.WriteFile(typePath, []byte(contentType), 0644)
+
+	// Serve
+	w.Header().Set("Content-Type", contentType)
+	w.Header().Set("Cache-Control", "public, max-age=86400")
+	w.Write(body)
+}
+
 // ---------- Main ----------
 
 func main() {
@@ -479,6 +580,7 @@ func main() {
 	mux.HandleFunc("/", handleIndex)
 	mux.HandleFunc("/xmlguide.xmltv", handleXMLTV)
 	mux.HandleFunc("/api/guide.json", handleGuideJSON(state))
+	mux.HandleFunc("/img", handleImage)
 
 	srv := &http.Server{
 		Addr:    ":" + port,

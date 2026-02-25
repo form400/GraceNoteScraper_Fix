@@ -14,11 +14,12 @@
   --row-bg: #111;
   --row-alt: #0d0d0d;
   --border: #1a2a2a;
-  --dim: #556;
+  --dim: #889;
   --ch-width: 160px;
   --topbar-h: 48px;
   --header-h: 32px;
   --row-h: 56px;
+  --detail-h: 130px;
 }
 
 body {
@@ -176,16 +177,114 @@ body::after {
   box-shadow: 0 0 6px var(--orange);
 }
 
+/* ── Detail bar (expanded top row) ── */
+.detail-bar {
+  position: fixed;
+  top: calc(var(--topbar-h) + var(--header-h));
+  left: 0; right: 0;
+  height: var(--detail-h);
+  background: linear-gradient(180deg, #111 0%, #0a0a0a 100%);
+  border-bottom: 1px solid var(--border);
+  display: none;
+  align-items: center;
+  gap: 16px;
+  padding: 8px 16px;
+  z-index: 155;
+}
+
+.detail-bar.active { display: flex; }
+
+.detail-ch {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 180px;
+  flex-shrink: 0;
+}
+
+.detail-ch-logo {
+  width: 48px;
+  height: 48px;
+  object-fit: contain;
+  border-radius: 4px;
+  flex-shrink: 0;
+}
+
+.detail-ch-number {
+  font-size: 22px;
+  font-weight: bold;
+  color: var(--cyan);
+  text-shadow: 0 0 6px rgba(0,229,255,0.3);
+  line-height: 1;
+}
+
+.detail-ch-name {
+  font-size: 11px;
+  color: var(--dim);
+  text-transform: uppercase;
+  letter-spacing: 1px;
+}
+
+.detail-poster {
+  width: 64px;
+  height: 96px;
+  object-fit: cover;
+  border-radius: 3px;
+  flex-shrink: 0;
+  border: 1px solid var(--border);
+}
+
+.detail-info {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.detail-title {
+  font-size: 14px;
+  font-weight: bold;
+  color: #eee;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.detail-subtitle {
+  font-size: 11px;
+  color: var(--orange);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.detail-time {
+  font-size: 10px;
+  color: var(--dim);
+  margin-top: 2px;
+}
+
+.detail-desc {
+  font-size: 10px;
+  color: #999;
+  margin-top: 3px;
+  line-height: 1.3;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
 /* ── Guide scroll area ── */
 .guide-wrap {
   position: fixed;
   top: calc(var(--topbar-h) + var(--header-h));
   left: 0; right: 0; bottom: 0;
-  overflow-y: scroll;
-  scrollbar-width: none;
-  -ms-overflow-style: none;
+  overflow: hidden;
 }
-.guide-wrap::-webkit-scrollbar { display: none; }
+
+.guide-wrap.with-detail {
+  top: calc(var(--topbar-h) + var(--header-h) + var(--detail-h));
+}
 
 .guide-inner {}
 
@@ -272,13 +371,13 @@ body::after {
 }
 
 .prog-block-now {
-  background: #161e16;
-  border-color: #2a3a2a;
+  background: #1a1a1a;
+  border-color: #2a2a2a;
   border-left: 3px solid var(--orange);
 }
 
 .prog-block-now:hover {
-  background: #1c261c;
+  background: #222;
 }
 
 .prog-block-title {
@@ -331,6 +430,20 @@ body::after {
   color: var(--orange);
   text-shadow: 0 0 10px var(--orange);
 }
+
+@media (max-width: 600px) {
+  :root {
+    --ch-width: 90px;
+    --detail-h: 110px;
+  }
+  .ch-logo, .ch-logo-placeholder { width: 20px; height: 20px; }
+  .ch-number { font-size: 13px; }
+  .ch-name { font-size: 8px; max-width: 50px; }
+  .detail-ch { min-width: 100px; }
+  .detail-ch-logo { width: 32px; height: 32px; }
+  .detail-ch-number { font-size: 16px; }
+  .detail-poster { width: 48px; height: 72px; }
+}
 </style>
 </head>
 <body>
@@ -348,6 +461,8 @@ body::after {
   <div class="header-timeline" id="headerTimeline"></div>
 </div>
 
+<div class="detail-bar" id="detailBar"></div>
+
 <div class="guide-wrap" id="guideWrap">
   <div class="status-msg" id="statusMsg">LOADING GUIDE DATA...</div>
   <div class="guide-inner" id="guideInner"></div>
@@ -357,17 +472,19 @@ body::after {
 (function() {
   'use strict';
 
-  var guideData = null;
-  var scrollEl  = document.getElementById('guideWrap');
-  var innerEl   = document.getElementById('guideInner');
-  var statusEl  = document.getElementById('statusMsg');
-  var headerTL  = document.getElementById('headerTimeline');
-  var clockEl   = document.getElementById('clock');
-  var dateEl    = document.getElementById('date');
+  var guideData  = null;
+  var scrollEl   = document.getElementById('guideWrap');
+  var innerEl    = document.getElementById('guideInner');
+  var statusEl   = document.getElementById('statusMsg');
+  var headerTL   = document.getElementById('headerTimeline');
+  var clockEl    = document.getElementById('clock');
+  var dateEl     = document.getElementById('date');
+  var detailBar  = document.getElementById('detailBar');
 
   var autoScroll   = true;
-  var scrollSpeed  = 40; // px/sec
+  var scrollSpeed  = 18; // px/sec
   var lastFrame    = 0;
+  var scrollY      = 0;  // virtual scroll position (no browser cap)
   var pauseTimer   = null;
   var PAUSE_MS     = 5000;
 
@@ -440,6 +557,8 @@ body::after {
     var win = getTimeWindow();
     renderHeader(win);
     renderGrid(win);
+    lastDetailIdx = -1; // force detail bar refresh
+    updateDetailBar();
   }
 
   // ── Header: time labels + grid lines + now line ──
@@ -542,21 +661,103 @@ body::after {
     '</div>';
   }
 
-  // ── Auto-scroll ──
+  // ── Detail bar: shows expanded info for topmost channel ──
+  var lastDetailIdx = -1;
+
+  function updateDetailBar() {
+    if (!guideData || !guideData.channels || !guideData.channels.length) {
+      detailBar.className = 'detail-bar';
+      scrollEl.className = 'guide-wrap';
+      return;
+    }
+
+    var channels = guideData.channels;
+    var rowH = 57; // row-h (56) + 1px border
+    var channelCount = channels.length;
+    var idx = Math.floor(scrollY / rowH) % channelCount;
+    if (idx < 0) idx += channelCount;
+
+    // Only re-render if the channel changed
+    if (idx === lastDetailIdx) return;
+    lastDetailIdx = idx;
+
+    var ch = channels[idx];
+    var now = Date.now();
+
+    // Find current program
+    var curProg = null;
+    var progs = ch.programs || [];
+    for (var i = 0; i < progs.length; i++) {
+      var ps = new Date(progs[i].start).getTime();
+      var pe = new Date(progs[i].end).getTime();
+      if (ps <= now && now < pe) { curProg = progs[i]; break; }
+    }
+    // Fallback: next upcoming program
+    if (!curProg) {
+      for (var j = 0; j < progs.length; j++) {
+        if (new Date(progs[j].start).getTime() > now) { curProg = progs[j]; break; }
+      }
+    }
+
+    // Build HTML
+    var h = '';
+
+    // Channel section
+    h += '<div class="detail-ch">';
+    if (ch.logoUrl) {
+      h += '<img class="detail-ch-logo" src="' + esc(ch.logoUrl) + '" alt="" onerror="this.style.display=\'none\'">';
+    }
+    h += '<div>';
+    h += '<div class="detail-ch-number">' + esc(ch.number) + '</div>';
+    h += '<div class="detail-ch-name">' + esc(ch.name) + '</div>';
+    h += '</div></div>';
+
+    if (curProg) {
+      // Poster
+      if (curProg.iconUrl) {
+        h += '<img class="detail-poster" src="' + esc(curProg.iconUrl) + '" alt="" onerror="this.style.display=\'none\'">';
+      }
+
+      // Info
+      h += '<div class="detail-info">';
+      h += '<div class="detail-title">' + esc(curProg.title) + '</div>';
+      if (curProg.subTitle) {
+        h += '<div class="detail-subtitle">' + esc(curProg.subTitle) + '</div>';
+      }
+      var startLabel = fmtTime(new Date(curProg.start));
+      var endLabel   = fmtTime(new Date(curProg.end));
+      h += '<div class="detail-time">' + startLabel + ' \u2013 ' + endLabel + '</div>';
+      if (curProg.description) {
+        h += '<div class="detail-desc">' + esc(curProg.description) + '</div>';
+      }
+      h += '</div>';
+    }
+
+    detailBar.innerHTML = h;
+    detailBar.className = 'detail-bar active';
+    scrollEl.className = 'guide-wrap with-detail';
+  }
+
+  // ── Auto-scroll via translateY (avoids browser scrollTop ceiling) ──
+  function applyScroll() {
+    innerEl.style.transform = 'translateY(' + (-scrollY) + 'px)';
+  }
+
   function scrollLoop(ts) {
     if (!lastFrame) lastFrame = ts;
     var dt = (ts - lastFrame) / 1000;
     lastFrame = ts;
 
-    if (autoScroll && innerEl.scrollHeight > 0) {
-      scrollEl.scrollTop += scrollSpeed * dt;
-
-      // Seamless loop: reset when we've scrolled past the first copy
-      var half = innerEl.scrollHeight / 2;
-      if (half > 0 && scrollEl.scrollTop >= half) {
-        scrollEl.scrollTop -= half;
+    if (autoScroll) {
+      var half = innerEl.offsetHeight / 2;
+      if (half > 0) {
+        scrollY += scrollSpeed * dt;
+        // Seamless loop: reset when first copy has scrolled out
+        if (scrollY >= half) scrollY -= half;
+        applyScroll();
       }
     }
+    updateDetailBar();
     requestAnimationFrame(scrollLoop);
   }
   requestAnimationFrame(scrollLoop);
@@ -567,24 +768,19 @@ body::after {
     pauseTimer = setTimeout(function() { autoScroll = true; }, PAUSE_MS);
   }
 
-  // Hover: pause while over grid
-  scrollEl.addEventListener('mouseenter', function() {
-    autoScroll = false;
-    clearTimeout(pauseTimer);
-  });
-  scrollEl.addEventListener('mouseleave', function() {
-    autoScroll = true;
-    clearTimeout(pauseTimer);
-  });
-
-  // Wheel: manual scroll, resume after idle
+  // Wheel: manual scroll, pause auto-scroll, resume after idle
   scrollEl.addEventListener('wheel', function(e) {
     e.preventDefault();
-    scrollEl.scrollTop += e.deltaY;
+    var half = innerEl.offsetHeight / 2;
+    scrollY += e.deltaY;
+    if (half > 0) {
+      scrollY = ((scrollY % half) + half) % half; // wrap around
+    }
+    applyScroll();
     pauseAuto();
   }, { passive: false });
 
-  // Touch
+  // Touch: pause while touching, resume after idle
   scrollEl.addEventListener('touchstart', function() {
     autoScroll = false;
     clearTimeout(pauseTimer);
