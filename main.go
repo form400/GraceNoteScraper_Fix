@@ -1,11 +1,21 @@
 package main
 
 import (
+	"context"
+	"embed"
+	"encoding/json"
+	"flag"
 	"fmt"
 	"html"
 	"log"
+	"net/http"
 	"os"
+	"os/signal"
+	"path/filepath"
+	"sort"
 	"strings"
+	"sync"
+	"syscall"
 	"text/template"
 	"time"
 
@@ -17,13 +27,392 @@ import (
 	"github.com/joho/godotenv"
 )
 
+//go:embed guide.tmpl
+var guideTmplFS embed.FS
+
+//go:embed index.html
+var indexHTML []byte
+
+// ---------- GuideState ----------
+
+// GuideState holds the current guide data, safe for concurrent access.
+type GuideState struct {
+	mu    sync.RWMutex
+	guide *guide.TVGuide
+}
+
+func (s *GuideState) Update(g *guide.TVGuide) {
+	s.mu.Lock()
+	s.guide = g
+	s.mu.Unlock()
+}
+
+func (s *GuideState) Get() *guide.TVGuide {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.guide
+}
+
+// ---------- JSON API types ----------
+
+type APIGuide struct {
+	Generated string       `json:"generated"`
+	Channels  []APIChannel `json:"channels"`
+}
+
+type APIChannel struct {
+	ID      string       `json:"id"`
+	Number  string       `json:"number"`
+	Name    string       `json:"name"`
+	LogoURL string       `json:"logoUrl"`
+	Programs []APIProgram `json:"programs"`
+}
+
+type APIProgram struct {
+	Title    string `json:"title"`
+	SubTitle string `json:"subTitle,omitempty"`
+	Start    string `json:"start"`
+	End      string `json:"end"`
+	Category string `json:"category,omitempty"`
+	IsNew    bool   `json:"isNew,omitempty"`
+	Rating   string `json:"rating,omitempty"`
+	IconURL  string `json:"iconUrl,omitempty"`
+}
+
+// ---------- Conversion ----------
+
+// guideToJSON converts a TVGuide into the simplified JSON API format.
+func guideToJSON(g *guide.TVGuide) APIGuide {
+	// Build channel-id -> programs map
+	chanProgs := make(map[string][]APIProgram)
+	for _, p := range g.Programs {
+		cat := ""
+		if len(p.Categories) > 0 {
+			cat = p.Categories[0].Name
+		}
+		ap := APIProgram{
+			Title:    html.UnescapeString(p.Title),
+			SubTitle: html.UnescapeString(p.SubTitle),
+			Start:    xmltvTimeToISO(p.Start),
+			End:      xmltvTimeToISO(p.Stop),
+			Category: cat,
+			IsNew:    p.New,
+			Rating:   p.Rating,
+			IconURL:  p.IconSrc,
+		}
+		chanProgs[p.Channel] = append(chanProgs[p.Channel], ap)
+	}
+
+	// Sort programs by start time within each channel
+	for id := range chanProgs {
+		progs := chanProgs[id]
+		sort.Slice(progs, func(i, j int) bool {
+			return progs[i].Start < progs[j].Start
+		})
+	}
+
+	var channels []APIChannel
+	for _, ch := range g.Channels {
+		number := ""
+		name := ""
+		if len(ch.DisplayNames) >= 3 {
+			number = ch.DisplayNames[1].Name // just the number
+			name = ch.DisplayNames[2].Name   // just the callsign
+		} else if len(ch.DisplayNames) >= 1 {
+			name = ch.DisplayNames[0].Name
+		}
+		channels = append(channels, APIChannel{
+			ID:       ch.ID,
+			Number:   html.UnescapeString(number),
+			Name:     html.UnescapeString(name),
+			LogoURL:  ch.IconURL,
+			Programs: chanProgs[ch.ID],
+		})
+	}
+
+	// Sort channels by number (numeric sort)
+	sort.Slice(channels, func(i, j int) bool {
+		return channelNumberLess(channels[i].Number, channels[j].Number)
+	})
+
+	return APIGuide{
+		Generated: time.Now().UTC().Format(time.RFC3339),
+		Channels:  channels,
+	}
+}
+
+// channelNumberLess compares channel numbers numerically where possible.
+func channelNumberLess(a, b string) bool {
+	// Try to parse as float for numeric comparison (handles "5.1", "12", etc.)
+	var ai, bi float64
+	_, errA := fmt.Sscanf(a, "%f", &ai)
+	_, errB := fmt.Sscanf(b, "%f", &bi)
+	if errA == nil && errB == nil {
+		return ai < bi
+	}
+	return a < b
+}
+
+// xmltvTimeToISO converts "20250225200000 +0000" → "2025-02-25T20:00:00Z"
+func xmltvTimeToISO(xmltvTime string) string {
+	xmltvTime = strings.TrimSpace(xmltvTime)
+	// Strip the timezone suffix — we assume +0000 (UTC)
+	if idx := strings.Index(xmltvTime, " "); idx >= 0 {
+		xmltvTime = xmltvTime[:idx]
+	}
+	if len(xmltvTime) < 14 {
+		return xmltvTime
+	}
+	return xmltvTime[0:4] + "-" + xmltvTime[4:6] + "-" + xmltvTime[6:8] +
+		"T" + xmltvTime[8:10] + ":" + xmltvTime[10:12] + ":" + xmltvTime[12:14] + "Z"
+}
+
+// ---------- Scraping ----------
+
+// runScrape performs the full scrape cycle and returns the populated TVGuide.
+// It also writes xmlguide.xmltv atomically.
+func runScrape(tmdbClient *tmdb.Client, logoClient *tvlogo.Client, lang, country string) (*guide.TVGuide, error) {
+	client := web.NewClient()
+
+	now := time.Now().UTC()
+	midnight := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
+	endTime := midnight.Add(time.Hour * 24)
+
+	channelMap := make(map[string]guide.Channel)
+	eventMap := make(map[string]bool)
+	var programs []guide.Program
+
+	for t := midnight; t.Before(endTime); t = t.Add(6 * time.Hour) {
+		ts := t.Unix()
+		log.Printf("Fetching grid for time=%d (%s)", ts, t.Format(time.RFC3339))
+
+		grid, err := client.GetDataByTime(ts)
+		if err != nil {
+			log.Printf("Error fetching grid at %d: %v", ts, err)
+			continue
+		}
+
+		for _, ch := range grid.Channels {
+			if _, exists := channelMap[ch.ChannelID]; !exists {
+				channelMap[ch.ChannelID] = guide.ConvertChannel(ch)
+			}
+
+			for _, ev := range ch.Events {
+				dedupKey := ch.ChannelID + "|" + ev.StartTime + "|" + ev.EndTime
+				if eventMap[dedupKey] {
+					continue
+				}
+				eventMap[dedupKey] = true
+				programs = append(programs, guide.ConvertEvent(ev, ch.ChannelID, lang, country))
+			}
+		}
+
+		log.Printf("Channels so far: %d, Events so far: %d", len(channelMap), len(programs))
+
+		if t.Add(6 * time.Hour).Before(endTime) {
+			time.Sleep(5 * time.Second)
+		}
+	}
+
+	var channels []guide.Channel
+	for _, ch := range channelMap {
+		channels = append(channels, ch)
+	}
+
+	enrichChannelIcons(logoClient, channels)
+	enrichProgramThumbnails(tmdbClient, programs)
+
+	tvGuide := &guide.TVGuide{
+		Channels: channels,
+		Programs: programs,
+	}
+
+	log.Printf("Rendering XMLTV: %d channels, %d programs", len(channels), len(programs))
+
+	// Parse embedded template
+	tmpl, err := template.ParseFS(guideTmplFS, "guide.tmpl")
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse template: %w", err)
+	}
+
+	// Atomic write: write to temp file, then rename
+	tmpFile, err := os.CreateTemp(".", "xmlguide-*.tmp")
+	if err != nil {
+		return nil, fmt.Errorf("failed to create temp file: %w", err)
+	}
+	tmpName := tmpFile.Name()
+
+	if err := tmpl.Execute(tmpFile, tvGuide); err != nil {
+		tmpFile.Close()
+		os.Remove(tmpName)
+		return nil, fmt.Errorf("failed to execute template: %w", err)
+	}
+	tmpFile.Close()
+
+	if err := os.Rename(tmpName, "xmlguide.xmltv"); err != nil {
+		os.Remove(tmpName)
+		return nil, fmt.Errorf("failed to rename output file: %w", err)
+	}
+
+	log.Printf("Wrote guide to xmlguide.xmltv")
+	saveGuideCache(tvGuide)
+	return tvGuide, nil
+}
+
+// ---------- Guide cache ----------
+
+const guideCachePath = "guide_cache.json"
+
+type guideCache struct {
+	SavedAt time.Time      `json:"saved_at"`
+	Guide   guide.TVGuide  `json:"guide"`
+}
+
+// saveGuideCache persists the TVGuide to a JSON file.
+func saveGuideCache(g *guide.TVGuide) {
+	data, err := json.Marshal(guideCache{SavedAt: time.Now(), Guide: *g})
+	if err != nil {
+		log.Printf("guide cache: failed to marshal: %v", err)
+		return
+	}
+	if err := os.WriteFile(guideCachePath, data, 0644); err != nil {
+		log.Printf("guide cache: failed to write: %v", err)
+		return
+	}
+	log.Println("Saved guide cache")
+}
+
+// loadGuideCache loads the TVGuide from the JSON cache if it's younger than maxAge.
+// Returns the guide, its age, and whether it was loaded.
+func loadGuideCache(maxAge time.Duration) (*guide.TVGuide, time.Duration, bool) {
+	data, err := os.ReadFile(guideCachePath)
+	if err != nil {
+		return nil, 0, false
+	}
+	var c guideCache
+	if err := json.Unmarshal(data, &c); err != nil {
+		log.Printf("guide cache: corrupt, ignoring: %v", err)
+		return nil, 0, false
+	}
+	age := time.Since(c.SavedAt)
+	if age >= maxAge {
+		return nil, age, false
+	}
+	return &c.Guide, age, true
+}
+
+// ---------- File rotation ----------
+
+// rotateFiles copies the current xmlguide.xmltv to a dated file and prunes old ones.
+func rotateFiles() {
+	dated := fmt.Sprintf("xmlguide.%s.xmltv", time.Now().UTC().Format("20060102"))
+
+	src, err := os.ReadFile("xmlguide.xmltv")
+	if err != nil {
+		log.Printf("rotate: failed to read xmlguide.xmltv: %v", err)
+		return
+	}
+
+	if err := os.WriteFile(dated, src, 0644); err != nil {
+		log.Printf("rotate: failed to write %s: %v", dated, err)
+		return
+	}
+	log.Printf("Rotated guide to %s", dated)
+
+	// Prune: keep only the 7 most recent dated files
+	matches, _ := filepath.Glob("xmlguide.*.xmltv")
+	if len(matches) <= 7 {
+		return
+	}
+
+	// Sort descending (newest first)
+	sort.Sort(sort.Reverse(sort.StringSlice(matches)))
+	for _, old := range matches[7:] {
+		log.Printf("Pruning old guide: %s", old)
+		os.Remove(old)
+	}
+}
+
+// ---------- Background scraper ----------
+
+// startScraper runs the scrape cycle on a 24-hour ticker.
+// If initialDelay > 0, the first scrape fires after that delay instead of 24h
+// (used when we skipped the startup scrape because the file was still fresh).
+func startScraper(ctx context.Context, state *GuideState, tmdbClient *tmdb.Client, logoClient *tvlogo.Client, lang, country string, initialDelay time.Duration) {
+	if initialDelay <= 0 {
+		initialDelay = 24 * time.Hour
+	}
+
+	timer := time.NewTimer(initialDelay)
+	defer timer.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			log.Println("Scraper shutting down")
+			return
+		case <-timer.C:
+			log.Println("Starting scheduled scrape cycle")
+			g, err := runScrape(tmdbClient, logoClient, lang, country)
+			if err != nil {
+				log.Printf("Scheduled scrape failed: %v", err)
+			} else {
+				state.Update(g)
+				rotateFiles()
+				log.Println("Scheduled scrape complete")
+			}
+			// All subsequent runs at 24h intervals
+			timer.Reset(24 * time.Hour)
+		}
+	}
+}
+
+// ---------- HTTP handlers ----------
+
+func handleIndex(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path != "/" {
+		http.NotFound(w, r)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Write(indexHTML)
+}
+
+func handleXMLTV(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/xml")
+	http.ServeFile(w, r, "xmlguide.xmltv")
+}
+
+func handleGuideJSON(state *GuideState) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		g := state.Get()
+		if g == nil {
+			http.Error(w, "Guide not available yet", http.StatusServiceUnavailable)
+			return
+		}
+
+		apiGuide := guideToJSON(g)
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		enc := json.NewEncoder(w)
+		enc.SetEscapeHTML(false)
+		enc.Encode(apiGuide)
+	}
+}
+
+// ---------- Main ----------
+
 func main() {
+	guideOnly := flag.Bool("guide-only", false, "Scrape once and exit (no server)")
+	flag.Parse()
+
 	if err := godotenv.Load(); err != nil {
 		log.Println("No .env file found, using environment variables")
 	}
 
 	lang := util.GetEnv("LANGUAGE", "en")
 	country := util.GetEnv("COUNTRY", "USA")
+	port := util.GetEnv("PORT", "8080")
 
 	tmdbToken := util.GetEnv("TMDB_TOKEN", "")
 	tmdbClient := tmdb.NewClient(tmdbToken, "tmdb_cache.json")
@@ -42,85 +431,83 @@ func main() {
 	}
 	defer logoClient.Close()
 
-	client := web.NewClient()
+	// --guide-only: always scrape, write output, exit
+	if *guideOnly {
+		log.Println("Starting scrape (guide-only mode)...")
+		if _, err := runScrape(tmdbClient, logoClient, lang, country); err != nil {
+			log.Fatalf("Scrape failed: %v", err)
+		}
+		log.Println("--guide-only: done")
+		return
+	}
 
-	// Time window: midnight today UTC to +14 days, stepping 6 hours
-	now := time.Now().UTC()
-	midnight := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
-	//endTime := midnight.Add(14 * 24 * time.Hour)
-	endTime := midnight.Add(time.Hour * 24)
-
-	channelMap := make(map[string]guide.Channel) // channelId -> Channel
-	eventMap := make(map[string]bool)            // dedup key -> seen
-	var programs []guide.Program
-
-	for t := midnight; t.Before(endTime); t = t.Add(6 * time.Hour) {
-		ts := t.Unix()
-		log.Printf("Fetching grid for time=%d (%s)", ts, t.Format(time.RFC3339))
-
-		grid, err := client.GetDataByTime(ts)
+	// Server mode: try loading cached guide data to skip a slow scrape
+	var g *guide.TVGuide
+	var nextScrapeIn time.Duration
+	if cached, age, ok := loadGuideCache(4 * time.Hour); ok {
+		log.Printf("Loaded guide from cache (%s old), skipping scrape", age.Round(time.Second))
+		g = cached
+		// Schedule next scrape for when the cache turns 24h old
+		nextScrapeIn = 24*time.Hour - age
+		if nextScrapeIn < time.Hour {
+			nextScrapeIn = time.Hour
+		}
+	} else {
+		log.Println("Starting initial scrape...")
+		var err error
+		g, err = runScrape(tmdbClient, logoClient, lang, country)
 		if err != nil {
-			log.Printf("Error fetching grid at %d: %v", ts, err)
-			continue
+			log.Fatalf("Initial scrape failed: %v", err)
 		}
+		rotateFiles()
+		nextScrapeIn = 24 * time.Hour
+	}
 
-		for _, ch := range grid.Channels {
-			// Dedup channels by channelId
-			if _, exists := channelMap[ch.ChannelID]; !exists {
-				channelMap[ch.ChannelID] = guide.ConvertChannel(ch)
-			}
+	state := &GuideState{}
+	state.Update(g)
 
-			// Process events
-			for _, ev := range ch.Events {
-				dedupKey := ch.ChannelID + "|" + ev.StartTime + "|" + ev.EndTime
-				if eventMap[dedupKey] {
-					continue
-				}
-				eventMap[dedupKey] = true
-				programs = append(programs, guide.ConvertEvent(ev, ch.ChannelID, lang, country))
-			}
+	// Signal context for graceful shutdown
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	// Start background scraper
+	log.Printf("Next scrape in %s", nextScrapeIn.Round(time.Minute))
+	go startScraper(ctx, state, tmdbClient, logoClient, lang, country, nextScrapeIn)
+
+	// HTTP server
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", handleIndex)
+	mux.HandleFunc("/xmlguide.xmltv", handleXMLTV)
+	mux.HandleFunc("/api/guide.json", handleGuideJSON(state))
+
+	srv := &http.Server{
+		Addr:    ":" + port,
+		Handler: mux,
+	}
+
+	// Start server in background
+	go func() {
+		log.Printf("HTTP server listening on :%s", port)
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("HTTP server error: %v", err)
 		}
+	}()
 
-		log.Printf("Channels so far: %d, Events so far: %d", len(channelMap), len(programs))
+	// Wait for shutdown signal
+	<-ctx.Done()
+	log.Println("Shutting down...")
 
-		// Sleep between requests to avoid problems
-		if t.Add(6 * time.Hour).Before(endTime) {
-			time.Sleep(5 * time.Second)
-		}
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if err := srv.Shutdown(shutdownCtx); err != nil {
+		log.Printf("HTTP server shutdown error: %v", err)
 	}
 
-	var channels []guide.Channel
-	for _, ch := range channelMap {
-		channels = append(channels, ch)
-	}
-
-	enrichChannelIcons(logoClient, channels)
-	enrichProgramThumbnails(tmdbClient, programs)
-
-	tvGuide := guide.TVGuide{
-		Channels: channels,
-		Programs: programs,
-	}
-
-	log.Printf("Rendering XMLTV: %d channels, %d programs", len(channels), len(programs))
-
-	tmpl, err := template.ParseFiles("guide.tmpl")
-	if err != nil {
-		log.Fatalf("Failed to parse template: %v", err)
-	}
-
-	outFile, err := os.Create("xmlguide.xmltv")
-	if err != nil {
-		log.Fatalf("Failed to create output file: %v", err)
-	}
-	defer outFile.Close()
-
-	if err := tmpl.Execute(outFile, tvGuide); err != nil {
-		log.Fatalf("Failed to execute template: %v", err)
-	}
-
-	log.Printf("Wrote guide to xmlguide.xmltv")
+	log.Println("Goodbye")
 }
+
+// ---------- Enrichment helpers ----------
 
 func xmlEscape(s string) string {
 	s = strings.ReplaceAll(s, "&", "&amp;")
@@ -145,7 +532,6 @@ func enrichProgramThumbnails(client *tmdb.Client, programs []guide.Program) {
 	var unique []titleKey
 
 	for _, p := range programs {
-		// Title is XML-escaped in guide.ConvertEvent; unescape for TMDB lookup
 		title := strings.ToLower(html.UnescapeString(p.Title))
 		isMovie := false
 		for _, cat := range p.Categories {
@@ -238,7 +624,6 @@ func enrichChannelIcons(client *tvlogo.Client, channels []guide.Channel) {
 			channels[i].IconURL = logoURL
 			enriched++
 		} else {
-			// Clear dead zap2it URL — no icon is better than a broken one
 			channels[i].IconURL = ""
 		}
 	}

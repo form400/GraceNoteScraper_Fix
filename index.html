@@ -1,0 +1,599 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CABLE GUIDE</title>
+<style>
+*, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+
+:root {
+  --cyan: #00e5ff;
+  --orange: #ff6b2c;
+  --bg: #0a0a0a;
+  --row-bg: #111;
+  --row-alt: #0d0d0d;
+  --border: #1a2a2a;
+  --dim: #556;
+  --ch-width: 160px;
+  --topbar-h: 48px;
+  --header-h: 32px;
+  --row-h: 56px;
+}
+
+body {
+  background: var(--bg);
+  color: #ccc;
+  font-family: 'Courier New', Courier, monospace;
+  overflow: hidden;
+  height: 100vh;
+}
+
+/* CRT scanline overlay */
+body::after {
+  content: '';
+  position: fixed;
+  inset: 0;
+  background: repeating-linear-gradient(
+    0deg,
+    transparent,
+    transparent 2px,
+    rgba(0,0,0,0.12) 2px,
+    rgba(0,0,0,0.12) 4px
+  );
+  pointer-events: none;
+  z-index: 1000;
+}
+
+/* ── Top bar ── */
+.topbar {
+  position: fixed;
+  top: 0; left: 0; right: 0;
+  height: var(--topbar-h);
+  background: linear-gradient(180deg, #111 0%, var(--bg) 100%);
+  border-bottom: 2px solid var(--cyan);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 20px;
+  z-index: 200;
+}
+
+.topbar-title {
+  font-size: 20px;
+  font-weight: bold;
+  color: var(--cyan);
+  text-shadow: 0 0 12px var(--cyan), 0 0 24px rgba(0,229,255,0.3);
+  letter-spacing: 4px;
+  text-transform: uppercase;
+}
+
+.topbar-right { text-align: right; }
+
+.topbar-clock {
+  font-size: 18px;
+  font-weight: bold;
+  color: var(--orange);
+  text-shadow: 0 0 10px var(--orange), 0 0 20px rgba(255,107,44,0.3);
+  letter-spacing: 2px;
+}
+
+.topbar-date {
+  font-size: 10px;
+  color: var(--dim);
+  letter-spacing: 1px;
+}
+
+/* ── Time header row ── */
+.header-row {
+  position: fixed;
+  top: var(--topbar-h);
+  left: 0; right: 0;
+  height: var(--header-h);
+  display: flex;
+  background: #0e0e0e;
+  border-bottom: 1px solid var(--border);
+  z-index: 150;
+}
+
+.header-pad {
+  width: var(--ch-width);
+  min-width: var(--ch-width);
+  border-right: 2px solid var(--border);
+}
+
+.header-timeline {
+  flex: 1;
+  position: relative;
+  overflow: visible;
+}
+
+.time-label {
+  position: absolute;
+  top: 0;
+  height: var(--header-h);
+  display: flex;
+  align-items: center;
+  padding-left: 8px;
+  font-size: 12px;
+  font-weight: bold;
+  letter-spacing: 1px;
+  z-index: 5;
+  pointer-events: none;
+}
+
+.time-label-hour {
+  color: var(--cyan);
+  text-shadow: 0 0 6px rgba(0,229,255,0.3);
+}
+
+.time-label-half {
+  color: var(--dim);
+  font-weight: normal;
+  font-size: 11px;
+}
+
+/* Grid lines — rendered in header, extend through viewport */
+.grid-line {
+  position: absolute;
+  top: 0;
+  width: 1px;
+  height: 200vh;
+  pointer-events: none;
+  z-index: 2;
+}
+
+.grid-line-hour {
+  width: 2px;
+  background: rgba(0,229,255,0.20);
+}
+
+.grid-line-half {
+  background: rgba(0,229,255,0.08);
+}
+
+/* Now indicator line */
+.now-line {
+  position: absolute;
+  top: 0;
+  width: 2px;
+  height: 200vh;
+  background: var(--orange);
+  opacity: 0.55;
+  z-index: 60;
+  pointer-events: none;
+  box-shadow: 0 0 6px var(--orange), 0 0 12px rgba(255,107,44,0.2);
+}
+
+.now-dot {
+  position: absolute;
+  top: -2px;
+  left: -3px;
+  width: 8px;
+  height: 8px;
+  background: var(--orange);
+  border-radius: 50%;
+  box-shadow: 0 0 6px var(--orange);
+}
+
+/* ── Guide scroll area ── */
+.guide-wrap {
+  position: fixed;
+  top: calc(var(--topbar-h) + var(--header-h));
+  left: 0; right: 0; bottom: 0;
+  overflow-y: scroll;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+.guide-wrap::-webkit-scrollbar { display: none; }
+
+.guide-inner {}
+
+/* ── Channel row ── */
+.ch-row {
+  display: flex;
+  height: var(--row-h);
+  border-bottom: 1px solid var(--border);
+}
+
+.ch-row:nth-child(odd)  { background: var(--row-bg); }
+.ch-row:nth-child(even) { background: var(--row-alt); }
+
+/* Channel info column */
+.ch-info {
+  width: var(--ch-width);
+  min-width: var(--ch-width);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 10px;
+  border-right: 2px solid var(--border);
+}
+
+.ch-logo {
+  width: 28px;
+  height: 28px;
+  object-fit: contain;
+  border-radius: 3px;
+  flex-shrink: 0;
+}
+
+.ch-logo-placeholder {
+  width: 28px;
+  height: 28px;
+  flex-shrink: 0;
+}
+
+.ch-number {
+  font-size: 16px;
+  font-weight: bold;
+  color: var(--cyan);
+  text-shadow: 0 0 4px rgba(0,229,255,0.3);
+  line-height: 1;
+}
+
+.ch-name {
+  font-size: 10px;
+  color: var(--dim);
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 80px;
+}
+
+/* ── Timeline area (per row) ── */
+.ch-timeline {
+  flex: 1;
+  position: relative;
+  overflow: hidden;
+}
+
+/* ── Program block ── */
+.prog-block {
+  position: absolute;
+  top: 4px;
+  bottom: 4px;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  padding: 2px 8px;
+  background: #151520;
+  border: 1px solid #252535;
+  border-radius: 3px;
+  overflow: hidden;
+  cursor: default;
+  transition: background 0.15s;
+}
+
+.prog-block:hover {
+  background: #1e1e30;
+}
+
+.prog-block-now {
+  background: #161e16;
+  border-color: #2a3a2a;
+  border-left: 3px solid var(--orange);
+}
+
+.prog-block-now:hover {
+  background: #1c261c;
+}
+
+.prog-block-title {
+  font-size: 12px;
+  font-weight: bold;
+  color: #ddd;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  line-height: 1.3;
+}
+
+.prog-block-now .prog-block-title {
+  color: #eee;
+}
+
+.prog-block-time {
+  font-size: 9px;
+  color: var(--dim);
+  white-space: nowrap;
+  line-height: 1.3;
+}
+
+.badge-new {
+  display: inline-block;
+  font-size: 8px;
+  font-weight: bold;
+  color: var(--bg);
+  background: var(--orange);
+  padding: 0 4px;
+  border-radius: 2px;
+  margin-left: 4px;
+  vertical-align: middle;
+  letter-spacing: 1px;
+}
+
+/* ── Status messages ── */
+.status-msg {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 60vh;
+  font-size: 16px;
+  color: var(--cyan);
+  text-shadow: 0 0 10px var(--cyan);
+  letter-spacing: 2px;
+}
+
+.status-msg.error {
+  color: var(--orange);
+  text-shadow: 0 0 10px var(--orange);
+}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <span class="topbar-title">Cable Guide</span>
+  <div class="topbar-right">
+    <div class="topbar-clock" id="clock">--:--:--</div>
+    <div class="topbar-date" id="date">---</div>
+  </div>
+</div>
+
+<div class="header-row">
+  <div class="header-pad"></div>
+  <div class="header-timeline" id="headerTimeline"></div>
+</div>
+
+<div class="guide-wrap" id="guideWrap">
+  <div class="status-msg" id="statusMsg">LOADING GUIDE DATA...</div>
+  <div class="guide-inner" id="guideInner"></div>
+</div>
+
+<script>
+(function() {
+  'use strict';
+
+  var guideData = null;
+  var scrollEl  = document.getElementById('guideWrap');
+  var innerEl   = document.getElementById('guideInner');
+  var statusEl  = document.getElementById('statusMsg');
+  var headerTL  = document.getElementById('headerTimeline');
+  var clockEl   = document.getElementById('clock');
+  var dateEl    = document.getElementById('date');
+
+  var autoScroll   = true;
+  var scrollSpeed  = 40; // px/sec
+  var lastFrame    = 0;
+  var pauseTimer   = null;
+  var PAUSE_MS     = 5000;
+
+  // ── Clock ──
+  function updateClock() {
+    var now = new Date();
+    clockEl.textContent = now.toLocaleTimeString('en-US', {
+      hour: '2-digit', minute: '2-digit', second: '2-digit'
+    });
+    dateEl.textContent = now.toLocaleDateString('en-US', {
+      weekday: 'short', month: 'short', day: 'numeric', year: 'numeric'
+    });
+  }
+  setInterval(updateClock, 1000);
+  updateClock();
+
+  // ── Time window: 2 hours starting from current half-hour ──
+  function getTimeWindow() {
+    var now   = new Date();
+    var mins  = now.getMinutes();
+    var start = new Date(now.getFullYear(), now.getMonth(), now.getDate(),
+                         now.getHours(), mins < 30 ? 0 : 30, 0, 0);
+    var end   = new Date(start.getTime() + 2 * 3600000);
+    return { start: start, end: end, dur: end - start };
+  }
+
+  // ── Fetch guide data ──
+  function fetchGuide() {
+    fetch('/api/guide.json')
+      .then(function(r) {
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        return r.json();
+      })
+      .then(function(data) {
+        guideData = data;
+        renderAll();
+      })
+      .catch(function(err) {
+        if (!guideData) {
+          statusEl.textContent  = 'SIGNAL LOST \u2014 ' + err.message;
+          statusEl.className    = 'status-msg error';
+          statusEl.style.display = '';
+        }
+      });
+  }
+  fetchGuide();
+  setInterval(fetchGuide, 300000);    // refresh data every 5 min
+  setInterval(renderAll,   60000);    // re-render every 60 sec (clock tick / now-line)
+
+  // ── Helpers ──
+  function esc(s) {
+    if (!s) return '';
+    var d = document.createElement('div');
+    d.appendChild(document.createTextNode(s));
+    return d.innerHTML;
+  }
+
+  function fmtTime(d) {
+    return d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
+  }
+
+  function fmtShortTime(d) {
+    return ':' + ('0' + d.getMinutes()).slice(-2);
+  }
+
+  // ── Render everything ──
+  function renderAll() {
+    if (!guideData || !guideData.channels) return;
+
+    var win = getTimeWindow();
+    renderHeader(win);
+    renderGrid(win);
+  }
+
+  // ── Header: time labels + grid lines + now line ──
+  function renderHeader(win) {
+    var html = '';
+    var now  = Date.now();
+
+    // Time marks every 30 minutes
+    for (var t = win.start.getTime(); t <= win.end.getTime(); t += 1800000) {
+      var pct  = ((t - win.start.getTime()) / win.dur * 100).toFixed(3);
+      var d    = new Date(t);
+      var isHour = d.getMinutes() === 0;
+
+      // Don't draw a label right at the trailing edge
+      if (t < win.end.getTime()) {
+        var cls   = isHour ? 'time-label time-label-hour' : 'time-label time-label-half';
+        var label = isHour ? fmtTime(d) : fmtShortTime(d);
+        html += '<div class="' + cls + '" style="left:' + pct + '%">' + label + '</div>';
+      }
+
+      // Grid line
+      var lineCls = isHour ? 'grid-line grid-line-hour' : 'grid-line grid-line-half';
+      html += '<div class="' + lineCls + '" style="left:' + pct + '%"></div>';
+    }
+
+    // Now line
+    if (now >= win.start.getTime() && now <= win.end.getTime()) {
+      var nowPct = ((now - win.start.getTime()) / win.dur * 100).toFixed(3);
+      html += '<div class="now-line" style="left:' + nowPct + '%"><div class="now-dot"></div></div>';
+    }
+
+    headerTL.innerHTML = html;
+  }
+
+  // ── Channel grid ──
+  function renderGrid(win) {
+    statusEl.style.display = 'none';
+
+    var channels = guideData.channels;
+    var html     = '';
+    var now      = Date.now();
+    var ws       = win.start.getTime();
+    var we       = win.end.getTime();
+
+    for (var c = 0; c < channels.length; c++) {
+      html += renderRow(channels[c], ws, we, win.dur, now);
+    }
+
+    // Duplicate for seamless vertical loop
+    innerEl.innerHTML = html + html;
+  }
+
+  function renderRow(ch, ws, we, dur, now) {
+    // Channel info
+    var logoHtml = ch.logoUrl
+      ? '<img class="ch-logo" src="' + esc(ch.logoUrl) + '" alt="" loading="lazy" onerror="this.style.display=\'none\'">'
+      : '<div class="ch-logo-placeholder"></div>';
+
+    // Programs in window
+    var progsHtml = '';
+    var progs     = ch.programs || [];
+
+    for (var i = 0; i < progs.length; i++) {
+      var p  = progs[i];
+      var ps = new Date(p.start).getTime();
+      var pe = new Date(p.end).getTime();
+
+      // Skip if outside window
+      if (pe <= ws || ps >= we) continue;
+
+      // Clamp to window
+      var cs = Math.max(ps, ws);
+      var ce = Math.min(pe, we);
+
+      var leftPct  = ((cs - ws) / dur * 100).toFixed(3);
+      var widthPct = ((ce - cs) / dur * 100).toFixed(3);
+
+      var isNow   = (ps <= now && now < pe);
+      var cls     = 'prog-block' + (isNow ? ' prog-block-now' : '');
+      var newBadge = p.isNew ? '<span class="badge-new">NEW</span>' : '';
+
+      var startLabel = fmtTime(new Date(ps));
+      var endLabel   = fmtTime(new Date(pe));
+
+      progsHtml += '<div class="' + cls + '" style="left:' + leftPct + '%;width:' + widthPct + '%">' +
+        '<div class="prog-block-title">' + esc(p.title) + newBadge + '</div>' +
+        '<div class="prog-block-time">' + startLabel + ' \u2013 ' + endLabel + '</div>' +
+      '</div>';
+    }
+
+    return '<div class="ch-row">' +
+      '<div class="ch-info">' +
+        logoHtml +
+        '<div>' +
+          '<div class="ch-number">' + esc(ch.number) + '</div>' +
+          '<div class="ch-name">' + esc(ch.name) + '</div>' +
+        '</div>' +
+      '</div>' +
+      '<div class="ch-timeline">' + progsHtml + '</div>' +
+    '</div>';
+  }
+
+  // ── Auto-scroll ──
+  function scrollLoop(ts) {
+    if (!lastFrame) lastFrame = ts;
+    var dt = (ts - lastFrame) / 1000;
+    lastFrame = ts;
+
+    if (autoScroll && innerEl.scrollHeight > 0) {
+      scrollEl.scrollTop += scrollSpeed * dt;
+
+      // Seamless loop: reset when we've scrolled past the first copy
+      var half = innerEl.scrollHeight / 2;
+      if (half > 0 && scrollEl.scrollTop >= half) {
+        scrollEl.scrollTop -= half;
+      }
+    }
+    requestAnimationFrame(scrollLoop);
+  }
+  requestAnimationFrame(scrollLoop);
+
+  function pauseAuto() {
+    autoScroll = false;
+    clearTimeout(pauseTimer);
+    pauseTimer = setTimeout(function() { autoScroll = true; }, PAUSE_MS);
+  }
+
+  // Hover: pause while over grid
+  scrollEl.addEventListener('mouseenter', function() {
+    autoScroll = false;
+    clearTimeout(pauseTimer);
+  });
+  scrollEl.addEventListener('mouseleave', function() {
+    autoScroll = true;
+    clearTimeout(pauseTimer);
+  });
+
+  // Wheel: manual scroll, resume after idle
+  scrollEl.addEventListener('wheel', function(e) {
+    e.preventDefault();
+    scrollEl.scrollTop += e.deltaY;
+    pauseAuto();
+  }, { passive: false });
+
+  // Touch
+  scrollEl.addEventListener('touchstart', function() {
+    autoScroll = false;
+    clearTimeout(pauseTimer);
+  }, { passive: true });
+  scrollEl.addEventListener('touchend', function() {
+    pauseAuto();
+  }, { passive: true });
+
+})();
+</script>
+</body>
+</html>

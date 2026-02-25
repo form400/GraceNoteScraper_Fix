@@ -3,3 +3,4 @@
 *.xmltv
 tmdb_cache.json
 tvlogo_cache.json
+guide_cache.json
