@@ -99,10 +99,6 @@ func guideToJSON(g *guide.TVGuide) APIGuide {
 		if desc == "Unavailable" {
 			desc = ""
 		}
-		iconURL := p.IconSrc
-		if iconURL != "" {
-			iconURL = "/img?url=" + neturl.QueryEscape(iconURL)
-		}
 		ap := APIProgram{
 			Title:       html.UnescapeString(p.Title),
 			SubTitle:    html.UnescapeString(p.SubTitle),
@@ -111,7 +107,7 @@ func guideToJSON(g *guide.TVGuide) APIGuide {
 			Category:    cat,
 			IsNew:       p.New,
 			Rating:      p.Rating,
-			IconURL:     iconURL,
+			IconURL:     p.IconSrc,
 			Description: desc,
 		}
 		chanProgs[p.Channel] = append(chanProgs[p.Channel], ap)
@@ -135,15 +131,11 @@ func guideToJSON(g *guide.TVGuide) APIGuide {
 		} else if len(ch.DisplayNames) >= 1 {
 			name = ch.DisplayNames[0].Name
 		}
-		logoURL := ch.IconURL
-		if logoURL != "" {
-			logoURL = "/img?url=" + neturl.QueryEscape(logoURL)
-		}
 		channels = append(channels, APIChannel{
 			ID:       ch.ID,
 			Number:   html.UnescapeString(number),
 			Name:     html.UnescapeString(name),
-			LogoURL:  logoURL,
+			LogoURL:  ch.IconURL,
 			Programs: chanProgs[ch.ID],
 		})
 	}
@@ -189,7 +181,7 @@ func xmltvTimeToISO(xmltvTime string) string {
 
 // runScrape performs the full scrape cycle and returns the populated TVGuide.
 // It also writes xmlguide.xmltv atomically.
-func runScrape(tmdbClient *tmdb.Client, logoClient *tvlogo.Client, lang, country string) (*guide.TVGuide, error) {
+func runScrape(tmdbClient *tmdb.Client, logoClient *tvlogo.Client, lang, country, baseURL string) (*guide.TVGuide, error) {
 	client := web.NewClient()
 
 	now := time.Now().UTC()
@@ -239,6 +231,27 @@ func runScrape(tmdbClient *tmdb.Client, logoClient *tvlogo.Client, lang, country
 
 	enrichChannelIcons(logoClient, channels)
 	enrichProgramThumbnails(tmdbClient, programs)
+
+	// Rewrite image URLs to go through the local proxy
+	if baseURL != "" {
+		proxy := strings.TrimRight(baseURL, "/") + "/img?url="
+		for i := range channels {
+			if channels[i].IconURL != "" {
+				channels[i].IconURL = proxy + neturl.QueryEscape(channels[i].IconURL)
+			}
+		}
+		for i := range programs {
+			if programs[i].IconSrc != "" {
+				programs[i].IconSrc = proxy + neturl.QueryEscape(programs[i].IconSrc)
+			}
+			for j := range programs[i].Images {
+				if programs[i].Images[j].URL != "" {
+					programs[i].Images[j].URL = proxy + neturl.QueryEscape(programs[i].Images[j].URL)
+				}
+			}
+		}
+		log.Printf("Rewrote image URLs with base %s", baseURL)
+	}
 
 	tvGuide := &guide.TVGuide{
 		Channels: channels,
@@ -356,7 +369,7 @@ func rotateFiles() {
 // startScraper runs the scrape cycle on a 24-hour ticker.
 // If initialDelay > 0, the first scrape fires after that delay instead of 24h
 // (used when we skipped the startup scrape because the file was still fresh).
-func startScraper(ctx context.Context, state *GuideState, tmdbClient *tmdb.Client, logoClient *tvlogo.Client, lang, country string, initialDelay time.Duration) {
+func startScraper(ctx context.Context, state *GuideState, tmdbClient *tmdb.Client, logoClient *tvlogo.Client, lang, country, baseURL string, initialDelay time.Duration) {
 	if initialDelay <= 0 {
 		initialDelay = 24 * time.Hour
 	}
@@ -371,7 +384,7 @@ func startScraper(ctx context.Context, state *GuideState, tmdbClient *tmdb.Clien
 			return
 		case <-timer.C:
 			log.Println("Starting scheduled scrape cycle")
-			g, err := runScrape(tmdbClient, logoClient, lang, country)
+			g, err := runScrape(tmdbClient, logoClient, lang, country, baseURL)
 			if err != nil {
 				log.Printf("Scheduled scrape failed: %v", err)
 			} else {
@@ -514,6 +527,7 @@ func main() {
 	lang := util.GetEnv("LANGUAGE", "en")
 	country := util.GetEnv("COUNTRY", "USA")
 	port := util.GetEnv("PORT", "8080")
+	baseURL := util.GetEnv("BASE_URL", "")
 
 	tmdbToken := util.GetEnv("TMDB_TOKEN", "")
 	tmdbClient := tmdb.NewClient(tmdbToken, "tmdb_cache.json")
@@ -535,17 +549,20 @@ func main() {
 	// --guide-only: always scrape, write output, exit
 	if *guideOnly {
 		log.Println("Starting scrape (guide-only mode)...")
-		if _, err := runScrape(tmdbClient, logoClient, lang, country); err != nil {
+		if _, err := runScrape(tmdbClient, logoClient, lang, country, baseURL); err != nil {
 			log.Fatalf("Scrape failed: %v", err)
 		}
 		log.Println("--guide-only: done")
 		return
 	}
 
-	// Server mode: try loading cached guide data to skip a slow scrape
+	// Server mode: try loading cached guide data to skip a slow scrape.
+	// Always re-scrape if the XMLTV file or guide cache is missing.
 	var g *guide.TVGuide
 	var nextScrapeIn time.Duration
-	if cached, age, ok := loadGuideCache(4 * time.Hour); ok {
+	_, xmltvMissing := os.Stat("xmlguide.xmltv")
+	cached, age, cacheOK := loadGuideCache(4 * time.Hour)
+	if cacheOK && xmltvMissing == nil {
 		log.Printf("Loaded guide from cache (%s old), skipping scrape", age.Round(time.Second))
 		g = cached
 		// Schedule next scrape for when the cache turns 24h old
@@ -554,9 +571,12 @@ func main() {
 			nextScrapeIn = time.Hour
 		}
 	} else {
+		if xmltvMissing != nil {
+			log.Println("xmlguide.xmltv missing, scrape required")
+		}
 		log.Println("Starting initial scrape...")
 		var err error
-		g, err = runScrape(tmdbClient, logoClient, lang, country)
+		g, err = runScrape(tmdbClient, logoClient, lang, country, baseURL)
 		if err != nil {
 			log.Fatalf("Initial scrape failed: %v", err)
 		}
@@ -573,7 +593,7 @@ func main() {
 
 	// Start background scraper
 	log.Printf("Next scrape in %s", nextScrapeIn.Round(time.Minute))
-	go startScraper(ctx, state, tmdbClient, logoClient, lang, country, nextScrapeIn)
+	go startScraper(ctx, state, tmdbClient, logoClient, lang, country, baseURL, nextScrapeIn)
 
 	// HTTP server
 	mux := http.NewServeMux()

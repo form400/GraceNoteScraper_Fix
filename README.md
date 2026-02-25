@@ -92,6 +92,7 @@ Scrapes once, writes `xmlguide.xmltv` to the working directory, and exits. Usefu
 | `GN_LANGUAGE` | Language code | `en` |
 | `GN_DEVICE` | Device identifier | `-` |
 | `TMDB_TOKEN` | TMDB read access token (optional) | — |
+| `BASE_URL` | Server base URL — rewrites XMLTV image URLs to use the built-in proxy cache (e.g. `http://192.168.1.50:8080`) | — |
 | `PORT` | HTTP server port | `8080` |
 
 ## HTTP Endpoints
