@@ -9,9 +9,14 @@ import (
 	"github.com/daniel-widrick/GraceNoteScraper/guide"
 	"github.com/daniel-widrick/GraceNoteScraper/util"
 	"github.com/daniel-widrick/GraceNoteScraper/web"
+	"github.com/joho/godotenv"
 )
 
 func main() {
+	if err := godotenv.Load(); err != nil {
+		log.Println("No .env file found, using environment variables")
+	}
+
 	lang := util.GetEnv("LANGUAGE", "en")
 	country := util.GetEnv("COUNTRY", "USA")
 
