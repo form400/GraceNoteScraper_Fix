@@ -11,11 +11,13 @@ import (
 const cacheTTL = 7 * 24 * time.Hour
 
 type CacheEntry struct {
-	ImageURL  string  `json:"image_url"`
-	Rating    float64 `json:"rating,omitempty"`
-	Year      string  `json:"year,omitempty"`
-	Overview  string  `json:"overview,omitempty"`
-	FetchedAt int64   `json:"fetched_at"`
+	ImageURL     string  `json:"image_url"`
+	Rating       float64 `json:"rating,omitempty"`
+	Year         string  `json:"year,omitempty"`
+	Overview     string  `json:"overview,omitempty"`
+	TMDBID       int     `json:"tmdb_id,omitempty"`
+	OrigLanguage string  `json:"orig_language,omitempty"`
+	FetchedAt    int64   `json:"fetched_at"`
 }
 
 type Cache struct {

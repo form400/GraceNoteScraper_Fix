@@ -171,12 +171,19 @@ func enrichProgramThumbnails(client *tmdb.Client, programs []guide.Program) {
 			}
 		}
 		entry := results[titleKey{title: title, isMovie: isMovie}]
-		if entry.ImageURL == "" && entry.Rating == 0 && entry.Overview == "" && entry.Year == "" {
+		if entry.TMDBID == 0 && entry.ImageURL == "" && entry.Rating == 0 {
 			continue
 		}
 		enriched++
 		if entry.ImageURL != "" {
-			programs[i].Thumbnail = entry.ImageURL
+			programs[i].IconSrc = entry.ImageURL
+			programs[i].Images = []guide.Image{{
+				URL:    entry.ImageURL,
+				Type:   "poster",
+				Size:   "3",
+				Orient: "P",
+				System: "tmdb",
+			}}
 		}
 		if entry.Rating > 0 {
 			programs[i].StarRating = fmt.Sprintf("%.1f/10", entry.Rating)
@@ -186,6 +193,19 @@ func enrichProgramThumbnails(client *tmdb.Client, programs []guide.Program) {
 		}
 		if entry.Overview != "" && programs[i].Description == "Unavailable" {
 			programs[i].Description = xmlEscape(entry.Overview)
+		}
+		if entry.OrigLanguage != "" {
+			programs[i].OrigLanguage = entry.OrigLanguage
+		}
+		if entry.TMDBID != 0 {
+			tmdbEpNum := fmt.Sprintf("%d", entry.TMDBID)
+			if !isMovie {
+				tmdbEpNum = fmt.Sprintf("series/%d", entry.TMDBID)
+			}
+			programs[i].EpisodeNumbers = append(programs[i].EpisodeNumbers, guide.EpisodeNumber{
+				System:        "themoviedb.org",
+				EpisodeNumber: tmdbEpNum,
+			})
 		}
 	}
 

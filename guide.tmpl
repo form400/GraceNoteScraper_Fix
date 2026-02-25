@@ -20,9 +20,14 @@
     {{- if .Language }}
     <language>{{ .Language }}</language>
     {{- end }}
-    {{- if .Thumbnail }}
-    <thumbnail>{{ .Thumbnail }}</thumbnail>
-    <icon src="{{ .Thumbnail }}"/>
+    {{- if .OrigLanguage }}
+    <orig-language>{{ .OrigLanguage }}</orig-language>
+    {{- end }}
+    {{- if .IconSrc }}
+    <icon src="{{ .IconSrc }}"/>
+    {{- end }}
+    {{- range .Images }}
+    <image type="{{ .Type }}" size="{{ .Size }}" orient="{{ .Orient }}" system="{{ .System }}">{{ .URL }}</image>
     {{- end }}
     <url>{{ .URL }}</url>
     {{- if .Country }}

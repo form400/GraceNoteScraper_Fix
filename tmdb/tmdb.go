@@ -93,9 +93,11 @@ type searchResponse struct {
 }
 
 type searchResult struct {
-	PosterPath  *string `json:"poster_path"`
-	VoteAverage float64 `json:"vote_average"`
-	Overview    string  `json:"overview"`
+	ID               int     `json:"id"`
+	PosterPath       *string `json:"poster_path"`
+	VoteAverage      float64 `json:"vote_average"`
+	Overview         string  `json:"overview"`
+	OriginalLanguage string  `json:"original_language"`
 	// TV uses first_air_date, movie uses release_date
 	FirstAirDate string `json:"first_air_date"`
 	ReleaseDate  string `json:"release_date"`
@@ -135,8 +137,10 @@ func (c *Client) search(path, title string, isMovie bool) CacheEntry {
 
 	r := sr.Results[0]
 	entry := CacheEntry{
-		Rating:   r.VoteAverage,
-		Overview: r.Overview,
+		Rating:       r.VoteAverage,
+		Overview:     r.Overview,
+		TMDBID:       r.ID,
+		OrigLanguage: r.OriginalLanguage,
 	}
 
 	if r.PosterPath != nil {

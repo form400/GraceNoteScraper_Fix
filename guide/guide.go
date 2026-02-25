@@ -34,9 +34,11 @@ type Program struct {
 	Description     string
 	LengthUnits     string
 	Length          string
-	Thumbnail       string
+	IconSrc         string
+	Images          []Image
 	URL             string
 	Language        string
+	OrigLanguage    string
 	Country         string
 	EpisodeNumbers  []EpisodeNumber
 	Categories      []Category
@@ -48,6 +50,14 @@ type Program struct {
 	RatingSystem    string
 	StarRating      string
 	Date            string
+}
+
+type Image struct {
+	URL    string
+	Type   string
+	Size   string
+	Orient string
+	System string
 }
 
 type EpisodeNumber struct {
@@ -138,10 +148,10 @@ func ConvertEvent(ev web.JSONEvent, channelID, lang, country string) Program {
 		desc = xmlEscape(*ev.Program.ShortDesc)
 	}
 
-	// Thumbnail URL
-	thumbnail := ""
+	// Icon URL
+	iconSrc := ""
 	if ev.Thumbnail != "" {
-		thumbnail = "http://zap2it.tmsimg.com/assets/" + ev.Thumbnail + ".jpg"
+		iconSrc = "http://zap2it.tmsimg.com/assets/" + ev.Thumbnail + ".jpg"
 	}
 
 	// URL
@@ -244,7 +254,7 @@ func ConvertEvent(ev web.JSONEvent, channelID, lang, country string) Program {
 		Description:     desc,
 		LengthUnits:     "minutes",
 		Length:          ev.Duration,
-		Thumbnail:       thumbnail,
+		IconSrc:         iconSrc,
 		URL:             programURL,
 		Language:        lang,
 		Country:         country,
