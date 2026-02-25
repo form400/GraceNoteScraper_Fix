@@ -284,6 +284,7 @@ func runScrape(tmdbClient *tmdb.Client, logoClient *tvlogo.Client, lang, country
 		os.Remove(tmpName)
 		return nil, fmt.Errorf("failed to rename output file: %w", err)
 	}
+	os.Chmod("xmlguide.xmltv", 0644)
 
 	log.Printf("Wrote guide to xmlguide.xmltv")
 	saveGuideCache(tvGuide)
@@ -441,11 +442,11 @@ func imageURLAllowed(rawURL string) bool {
 	if err != nil {
 		return false
 	}
-	host := strings.ToLower(u.Host)
+	host := strings.ToLower(u.Hostname())
 	if host == "image.tmdb.org" {
 		return true
 	}
-	if host == "raw.githubusercontent.com" && strings.HasPrefix(u.Path, "/tv-logo") {
+	if host == "raw.githubusercontent.com" && strings.HasPrefix(u.Path, "/tv-logo/tv-logos/") {
 		return true
 	}
 	return false
@@ -468,15 +469,17 @@ func handleImage(w http.ResponseWriter, r *http.Request) {
 	datPath := filepath.Join(imageCacheDir, key+".dat")
 	typePath := filepath.Join(imageCacheDir, key+".type")
 
-	// Cache hit
-	if ct, err := os.ReadFile(typePath); err == nil {
+	// Cache hit — verify both files exist and are readable
+	ct, ctErr := os.ReadFile(typePath)
+	_, datErr := os.Stat(datPath)
+	if ctErr == nil && datErr == nil {
 		w.Header().Set("Content-Type", string(ct))
 		w.Header().Set("Cache-Control", "public, max-age=86400")
 		http.ServeFile(w, r, datPath)
 		return
 	}
 
-	// Cache miss — fetch upstream
+	// Cache miss or inconsistent — fetch upstream
 	client := &http.Client{Timeout: 10 * time.Second}
 	resp, err := client.Get(rawURL)
 	if err != nil {
@@ -504,9 +507,17 @@ func handleImage(w http.ResponseWriter, r *http.Request) {
 		contentType = "application/octet-stream"
 	}
 
-	// Write cache files (best-effort)
-	os.WriteFile(datPath, body, 0644)
-	os.WriteFile(typePath, []byte(contentType), 0644)
+	// Write cache files atomically (temp + rename)
+	if tmpDat, err := os.CreateTemp(imageCacheDir, "img-*.tmp"); err == nil {
+		if _, wErr := tmpDat.Write(body); wErr == nil {
+			tmpDat.Close()
+			os.Rename(tmpDat.Name(), datPath)
+			os.WriteFile(typePath, []byte(contentType), 0644)
+		} else {
+			tmpDat.Close()
+			os.Remove(tmpDat.Name())
+		}
+	}
 
 	// Serve
 	w.Header().Set("Content-Type", contentType)
@@ -524,8 +535,8 @@ func main() {
 		log.Println("No .env file found, using environment variables")
 	}
 
-	lang := util.GetEnv("LANGUAGE", "en")
-	country := util.GetEnv("COUNTRY", "USA")
+	lang := util.GetEnv("GN_LANGUAGE", "en")
+	country := util.GetEnv("GN_COUNTRY", "USA")
 	port := util.GetEnv("PORT", "8080")
 	baseURL := util.GetEnv("BASE_URL", "")
 
