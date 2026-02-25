@@ -46,6 +46,8 @@ type Program struct {
 	Subtitles       []Subtitle
 	Rating          string
 	RatingSystem    string
+	StarRating      string
+	Date            string
 }
 
 type EpisodeNumber struct {

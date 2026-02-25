@@ -1,12 +1,16 @@
 package main
 
 import (
+	"fmt"
+	"html"
 	"log"
 	"os"
+	"strings"
 	"text/template"
 	"time"
 
 	"github.com/daniel-widrick/GraceNoteScraper/guide"
+	"github.com/daniel-widrick/GraceNoteScraper/tmdb"
 	"github.com/daniel-widrick/GraceNoteScraper/util"
 	"github.com/daniel-widrick/GraceNoteScraper/web"
 	"github.com/joho/godotenv"
@@ -19,6 +23,15 @@ func main() {
 
 	lang := util.GetEnv("LANGUAGE", "en")
 	country := util.GetEnv("COUNTRY", "USA")
+
+	tmdbToken := util.GetEnv("TMDB_TOKEN", "")
+	tmdbClient := tmdb.NewClient(tmdbToken, "tmdb_cache.json")
+	if tmdbClient != nil {
+		log.Println("TMDB integration enabled")
+	} else {
+		log.Println("No TMDB token configured, skipping image enrichment")
+	}
+	defer tmdbClient.Close()
 
 	client := web.NewClient()
 
@@ -72,6 +85,8 @@ func main() {
 		channels = append(channels, ch)
 	}
 
+	enrichProgramThumbnails(tmdbClient, programs)
+
 	tvGuide := guide.TVGuide{
 		Channels: channels,
 		Programs: programs,
@@ -95,4 +110,84 @@ func main() {
 	}
 
 	log.Printf("Wrote guide to xmlguide.xmltv")
+}
+
+func xmlEscape(s string) string {
+	s = strings.ReplaceAll(s, "&", "&amp;")
+	s = strings.ReplaceAll(s, "<", "&lt;")
+	s = strings.ReplaceAll(s, ">", "&gt;")
+	return s
+}
+
+// enrichProgramThumbnails replaces broken Gracenote thumbnail URLs with TMDB
+// poster images, star ratings, dates, and descriptions.
+func enrichProgramThumbnails(client *tmdb.Client, programs []guide.Program) {
+	if client == nil {
+		return
+	}
+
+	// Phase 1: collect unique {title, isMovie} pairs
+	type titleKey struct {
+		title   string
+		isMovie bool
+	}
+	seen := make(map[titleKey]bool)
+	var unique []titleKey
+
+	for _, p := range programs {
+		// Title is XML-escaped in guide.ConvertEvent; unescape for TMDB lookup
+		title := strings.ToLower(html.UnescapeString(p.Title))
+		isMovie := false
+		for _, cat := range p.Categories {
+			if cat.Name == "movie" {
+				isMovie = true
+				break
+			}
+		}
+		k := titleKey{title: title, isMovie: isMovie}
+		if !seen[k] {
+			seen[k] = true
+			unique = append(unique, k)
+		}
+	}
+
+	log.Printf("TMDB: looking up %d unique titles", len(unique))
+
+	// Phase 2: lookup each unique title
+	results := make(map[titleKey]tmdb.CacheEntry)
+	for _, k := range unique {
+		results[k] = client.Lookup(k.title, k.isMovie)
+	}
+
+	// Phase 3: apply results back to programs
+	enriched := 0
+	for i := range programs {
+		title := strings.ToLower(html.UnescapeString(programs[i].Title))
+		isMovie := false
+		for _, cat := range programs[i].Categories {
+			if cat.Name == "movie" {
+				isMovie = true
+				break
+			}
+		}
+		entry := results[titleKey{title: title, isMovie: isMovie}]
+		if entry.ImageURL == "" && entry.Rating == 0 && entry.Overview == "" && entry.Year == "" {
+			continue
+		}
+		enriched++
+		if entry.ImageURL != "" {
+			programs[i].Thumbnail = entry.ImageURL
+		}
+		if entry.Rating > 0 {
+			programs[i].StarRating = fmt.Sprintf("%.1f/10", entry.Rating)
+		}
+		if entry.Year != "" {
+			programs[i].Date = entry.Year
+		}
+		if entry.Overview != "" && programs[i].Description == "Unavailable" {
+			programs[i].Description = xmlEscape(entry.Overview)
+		}
+	}
+
+	log.Printf("TMDB: enriched %d/%d programs", enriched, len(programs))
 }

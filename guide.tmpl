@@ -49,6 +49,12 @@
     {{- if .Rating }}
     <rating{{ if .RatingSystem }} system="{{ .RatingSystem }}"{{ end }}><value>{{ .Rating }}</value></rating>
     {{- end }}
+    {{- if .StarRating }}
+    <star-rating><value>{{ .StarRating }}</value></star-rating>
+    {{- end }}
+    {{- if .Date }}
+    <date>{{ .Date }}</date>
+    {{- end }}
   </programme>
 {{- end }}
 </tv>

@@ -1,3 +1,4 @@
 *.exe
 .env
 *.xmltv
+tmdb_cache.json

@@ -124,12 +124,12 @@ func NewClient() *Client {
 			},
 		},
 		pref: Preferences{
-			Country:  util.GetEnv("COUNTRY", "USA"),
-			ZipCode:  util.GetEnv("ZIPCODE", "13490"),
-			Headend:  util.GetEnv("HEADEND", "lineupId"),
-			LineupId: util.GetEnv("LINEUP", "USA-lineupId-DEFAULT"),
-			Device:   util.GetEnv("DEVICE", "-"),
-			Language: util.GetEnv("LANGUAGE", "en-us"),
+			Country:  util.GetEnv("GN_COUNTRY", "USA"),
+			ZipCode:  util.GetEnv("GN_ZIPCODE", "13490"),
+			Headend:  util.GetEnv("GN_HEADEND", "lineupId"),
+			LineupId: util.GetEnv("GN_LINEUP", "USA-lineupId-DEFAULT"),
+			Device:   util.GetEnv("GN_DEVICE", "-"),
+			Language: util.GetEnv("GN_LANGUAGE", "en-us"),
 		},
 	}
 }
