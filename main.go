@@ -13,6 +13,7 @@ import (
 	"log"
 	"net/http"
 	neturl "net/url"
+	"regexp"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -181,7 +182,7 @@ func xmltvTimeToISO(xmltvTime string) string {
 
 // runScrape performs the full scrape cycle and returns the populated TVGuide.
 // It also writes xmlguide.xmltv atomically.
-func runScrape(tmdbClient *tmdb.Client, logoClient *tvlogo.Client, lang, country, baseURL string) (*guide.TVGuide, error) {
+func runScrape(tmdbClient *tmdb.Client, logoClient *tvlogo.Client, lang, country, baseURL string, channelFilter map[string]bool) (*guide.TVGuide, error) {
 	client := web.NewClient()
 
 	now := time.Now().UTC()
@@ -258,7 +259,13 @@ func runScrape(tmdbClient *tmdb.Client, logoClient *tvlogo.Client, lang, country
 		Programs: programs,
 	}
 
-	log.Printf("Rendering XMLTV: %d channels, %d programs", len(channels), len(programs))
+	if channelFilter != nil {
+		before := len(tvGuide.Channels)
+		tvGuide = filterGuideChannels(tvGuide, channelFilter)
+		log.Printf("Channel filter: %d → %d channels (Jellyfin has %d)", before, len(tvGuide.Channels), len(channelFilter))
+	}
+
+	log.Printf("Rendering XMLTV: %d channels, %d programs", len(tvGuide.Channels), len(tvGuide.Programs))
 
 	// Parse embedded template
 	tmpl, err := template.ParseFS(guideTmplFS, "guide.tmpl")
@@ -370,7 +377,7 @@ func rotateFiles() {
 // startScraper runs the scrape cycle on a 24-hour ticker.
 // If initialDelay > 0, the first scrape fires after that delay instead of 24h
 // (used when we skipped the startup scrape because the file was still fresh).
-func startScraper(ctx context.Context, state *GuideState, tmdbClient *tmdb.Client, logoClient *tvlogo.Client, lang, country, baseURL string, initialDelay time.Duration) {
+func startScraper(ctx context.Context, state *GuideState, tmdbClient *tmdb.Client, logoClient *tvlogo.Client, lang, country, baseURL string, initialDelay time.Duration, jellyfinURL, jellyfinAPIKey string, filterEnabled bool) {
 	if initialDelay <= 0 {
 		initialDelay = 24 * time.Hour
 	}
@@ -385,7 +392,18 @@ func startScraper(ctx context.Context, state *GuideState, tmdbClient *tmdb.Clien
 			return
 		case <-timer.C:
 			log.Println("Starting scheduled scrape cycle")
-			g, err := runScrape(tmdbClient, logoClient, lang, country, baseURL)
+
+			var channelFilter map[string]bool
+			if filterEnabled {
+				cf, err := fetchJellyfinChannelNumbers(jellyfinURL, jellyfinAPIKey)
+				if err != nil {
+					log.Printf("Warning: could not fetch Jellyfin channels for filter, proceeding unfiltered: %v", err)
+				} else {
+					channelFilter = cf
+				}
+			}
+
+			g, err := runScrape(tmdbClient, logoClient, lang, country, baseURL, channelFilter)
 			if err != nil {
 				log.Printf("Scheduled scrape failed: %v", err)
 			} else {
@@ -525,6 +543,269 @@ func handleImage(w http.ResponseWriter, r *http.Request) {
 	w.Write(body)
 }
 
+// ---------- Jellyfin Live TV ----------
+
+var validJellyfinID = regexp.MustCompile(`^[0-9a-fA-F-]+$`)
+
+func handleLiveTVConfig(jellyfinURL, jellyfinAPIKey string) http.HandlerFunc {
+	enabled := jellyfinURL != "" && jellyfinAPIKey != ""
+	body := []byte(`{"enabled":false}`)
+	if enabled {
+		body = []byte(`{"enabled":true}`)
+	}
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write(body)
+	}
+}
+
+// handleLiveTVChannels proxies the Jellyfin channel list so the frontend
+// doesn't need credentials.
+func handleLiveTVChannels(jellyfinURL, jellyfinAPIKey string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if jellyfinURL == "" || jellyfinAPIKey == "" {
+			http.Error(w, "Live TV not configured", http.StatusServiceUnavailable)
+			return
+		}
+		url := fmt.Sprintf("%s/LiveTv/Channels?api_key=%s&SortBy=SortName&SortOrder=Ascending&AddCurrentProgram=true",
+			jellyfinURL, jellyfinAPIKey)
+		resp, err := http.Get(url)
+		if err != nil {
+			http.Error(w, "Failed to reach Jellyfin", http.StatusBadGateway)
+			return
+		}
+		defer resp.Body.Close()
+		body, _ := io.ReadAll(resp.Body)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(resp.StatusCode)
+		w.Write(body)
+	}
+}
+
+// handleLiveTVTune does the three-step Jellyfin live-stream handshake
+// server-side and returns a ready-to-play HLS URL.
+//
+// Flow: GET PlaybackInfo → POST LiveStreams/Open → build master.m3u8 URL.
+func handleLiveTVTune(jellyfinURL, jellyfinAPIKey string) http.HandlerFunc {
+	type playbackInfoResponse struct {
+		PlaySessionId string `json:"PlaySessionId"`
+		MediaSources  []struct {
+			Id        string `json:"Id"`
+			OpenToken string `json:"OpenToken"`
+		} `json:"MediaSources"`
+	}
+	type openStreamResponse struct {
+		MediaSource struct {
+			Id           string `json:"Id"`
+			LiveStreamId string `json:"LiveStreamId"`
+		} `json:"MediaSource"`
+	}
+
+	client := &http.Client{Timeout: 15 * time.Second}
+
+	jfGet := func(path string) ([]byte, error) {
+		url := fmt.Sprintf("%s%s?api_key=%s", jellyfinURL, path, jellyfinAPIKey)
+		resp, err := client.Get(url)
+		if err != nil {
+			return nil, fmt.Errorf("GET %s: %w", path, err)
+		}
+		defer resp.Body.Close()
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return nil, fmt.Errorf("reading %s: %w", path, err)
+		}
+		if resp.StatusCode >= 400 {
+			return nil, fmt.Errorf("GET %s returned %d: %s", path, resp.StatusCode, string(body))
+		}
+		return body, nil
+	}
+
+	jfPost := func(path, jsonBody string) ([]byte, error) {
+		url := fmt.Sprintf("%s%s&api_key=%s", jellyfinURL, path, jellyfinAPIKey)
+		req, err := http.NewRequest("POST", url, strings.NewReader(jsonBody))
+		if err != nil {
+			return nil, fmt.Errorf("creating POST %s: %w", path, err)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := client.Do(req)
+		if err != nil {
+			return nil, fmt.Errorf("POST %s: %w", path, err)
+		}
+		defer resp.Body.Close()
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return nil, fmt.Errorf("reading %s: %w", path, err)
+		}
+		if resp.StatusCode >= 400 {
+			return nil, fmt.Errorf("POST %s returned %d: %s", path, resp.StatusCode, string(body))
+		}
+		return body, nil
+	}
+
+	return func(w http.ResponseWriter, r *http.Request) {
+		channelId := r.URL.Query().Get("id")
+		if channelId == "" {
+			http.Error(w, "missing id parameter", http.StatusBadRequest)
+			return
+		}
+		if !validJellyfinID.MatchString(channelId) {
+			http.Error(w, "invalid id parameter", http.StatusBadRequest)
+			return
+		}
+
+		// Step 1: Get playback info → OpenToken, PlaySessionId, MediaSourceId
+		path := fmt.Sprintf("/Items/%s/PlaybackInfo", channelId)
+		body, err := jfGet(path)
+		if err != nil {
+			log.Printf("livetv tune step 1: %v", err)
+			http.Error(w, "PlaybackInfo failed: "+err.Error(), http.StatusBadGateway)
+			return
+		}
+
+		var info playbackInfoResponse
+		if err := json.Unmarshal(body, &info); err != nil {
+			log.Printf("livetv tune: parsing playback info: %v", err)
+			http.Error(w, "Failed to parse PlaybackInfo", http.StatusBadGateway)
+			return
+		}
+		if len(info.MediaSources) == 0 {
+			http.Error(w, "No media sources for channel", http.StatusBadGateway)
+			return
+		}
+
+		// Step 2: Open live stream → LiveStreamId
+		openBody := fmt.Sprintf(
+			`{"OpenToken":%q,"PlaySessionId":%q,"ItemId":%q}`,
+			info.MediaSources[0].OpenToken, info.PlaySessionId, channelId,
+		)
+		openPath := fmt.Sprintf("/LiveStreams/Open?PlaySessionId=%s&ItemId=%s",
+			info.PlaySessionId, channelId)
+		respBody, err := jfPost(openPath, openBody)
+		if err != nil {
+			log.Printf("livetv tune step 2: %v", err)
+			http.Error(w, "LiveStreams/Open failed: "+err.Error(), http.StatusBadGateway)
+			return
+		}
+
+		var opened openStreamResponse
+		if err := json.Unmarshal(respBody, &opened); err != nil {
+			log.Printf("livetv tune: parsing open stream: %v", err)
+			http.Error(w, "Failed to parse LiveStreams/Open", http.StatusBadGateway)
+			return
+		}
+
+		// Give the transcoder time to produce initial segments before
+		// handing the URL to the browser.  The working jellyfinapi
+		// implementation has a natural ~4s gap here because the user
+		// clicks "play" after the handshake completes.
+		time.Sleep(4 * time.Second)
+
+		// Step 3: Build master.m3u8 URL with all required parameters
+		streamURL := fmt.Sprintf(
+			"%s/Videos/%s/master.m3u8?api_key=%s&MediaSourceId=%s&PlaySessionId=%s&LiveStreamId=%s&VideoCodec=h264&AudioCodec=aac&SegmentContainer=ts&MinSegments=1&BreakOnNonKeyFrames=true&VideoBitrate=2000000&AudioBitrate=192000&MaxWidth=1920&MaxHeight=1080&AudioStreamIndex=-1&VideoStreamIndex=-1",
+			jellyfinURL, channelId, jellyfinAPIKey,
+			opened.MediaSource.Id, info.PlaySessionId, opened.MediaSource.LiveStreamId,
+		)
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{
+			"url":           streamURL,
+			"playSessionId": info.PlaySessionId,
+		})
+	}
+}
+
+// handleLiveTVStop forwards a playback-stop notification to Jellyfin.
+func handleLiveTVStop(jellyfinURL, jellyfinAPIKey string) http.HandlerFunc {
+	client := &http.Client{Timeout: 5 * time.Second}
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "POST required", http.StatusMethodNotAllowed)
+			return
+		}
+		body, _ := io.ReadAll(r.Body)
+		url := fmt.Sprintf("%s/Sessions/Playing/Stopped?api_key=%s", jellyfinURL, jellyfinAPIKey)
+		req, err := http.NewRequest("POST", url, strings.NewReader(string(body)))
+		if err != nil {
+			http.Error(w, "failed to build request", http.StatusInternalServerError)
+			return
+		}
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := client.Do(req)
+		if err != nil {
+			http.Error(w, "Jellyfin unreachable", http.StatusBadGateway)
+			return
+		}
+		defer resp.Body.Close()
+		io.ReadAll(resp.Body)
+		w.WriteHeader(resp.StatusCode)
+	}
+}
+
+// ---------- Jellyfin channel filter ----------
+
+// fetchJellyfinChannelNumbers queries Jellyfin for available live TV channels
+// and returns a set of their channel number strings.
+func fetchJellyfinChannelNumbers(jellyfinURL, jellyfinAPIKey string) (map[string]bool, error) {
+	url := fmt.Sprintf("%s/LiveTv/Channels?api_key=%s&SortBy=SortName", jellyfinURL, jellyfinAPIKey)
+	client := &http.Client{Timeout: 15 * time.Second}
+	resp, err := client.Get(url)
+	if err != nil {
+		return nil, fmt.Errorf("fetching Jellyfin channels: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("Jellyfin returned %d", resp.StatusCode)
+	}
+
+	var result struct {
+		Items []struct {
+			ChannelNumber string `json:"ChannelNumber"`
+		} `json:"Items"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("decoding Jellyfin channels: %w", err)
+	}
+
+	allowed := make(map[string]bool, len(result.Items))
+	for _, item := range result.Items {
+		if item.ChannelNumber != "" {
+			allowed[item.ChannelNumber] = true
+		}
+	}
+	return allowed, nil
+}
+
+// filterGuideChannels returns a new TVGuide containing only channels whose
+// number (DisplayNames[1]) is in the allowed set, along with their programs.
+func filterGuideChannels(g *guide.TVGuide, allowed map[string]bool) *guide.TVGuide {
+	allowedIDs := make(map[string]bool)
+	var channels []guide.Channel
+	for _, ch := range g.Channels {
+		number := ""
+		if len(ch.DisplayNames) >= 3 {
+			number = ch.DisplayNames[1].Name
+		}
+		if allowed[number] {
+			channels = append(channels, ch)
+			allowedIDs[ch.ID] = true
+		}
+	}
+
+	var programs []guide.Program
+	for _, p := range g.Programs {
+		if allowedIDs[p.Channel] {
+			programs = append(programs, p)
+		}
+	}
+
+	return &guide.TVGuide{
+		Channels: channels,
+		Programs: programs,
+	}
+}
+
 // ---------- Main ----------
 
 func main() {
@@ -539,6 +820,27 @@ func main() {
 	country := util.GetEnv("GN_COUNTRY", "USA")
 	port := util.GetEnv("PORT", "8080")
 	baseURL := util.GetEnv("BASE_URL", "")
+
+	jellyfinURL := strings.TrimRight(util.GetEnv("JELLYFIN_URL", ""), "/")
+	jellyfinAPIKey := util.GetEnv("JELLYFIN_API_KEY", "")
+	jellyfinConfigured := jellyfinURL != "" && jellyfinAPIKey != ""
+	if jellyfinConfigured {
+		log.Printf("Jellyfin Live TV integration enabled (%s)", jellyfinURL)
+	}
+
+	// Channel filter: only show channels available in Jellyfin
+	channelFilterEnabled := util.GetEnv("JELLYFIN_CHANNEL_FILTER", "") != "" && jellyfinConfigured
+	var channelFilter map[string]bool
+	if channelFilterEnabled {
+		cf, err := fetchJellyfinChannelNumbers(jellyfinURL, jellyfinAPIKey)
+		if err != nil {
+			log.Printf("Warning: could not fetch Jellyfin channels for filter: %v", err)
+			log.Println("Channel filter will be retried on next scheduled scrape")
+		} else {
+			channelFilter = cf
+			log.Printf("Channel filter enabled: %d Jellyfin channels", len(channelFilter))
+		}
+	}
 
 	tmdbToken := util.GetEnv("TMDB_TOKEN", "")
 	tmdbClient := tmdb.NewClient(tmdbToken, "tmdb_cache.json")
@@ -560,7 +862,7 @@ func main() {
 	// --guide-only: always scrape, write output, exit
 	if *guideOnly {
 		log.Println("Starting scrape (guide-only mode)...")
-		if _, err := runScrape(tmdbClient, logoClient, lang, country, baseURL); err != nil {
+		if _, err := runScrape(tmdbClient, logoClient, lang, country, baseURL, channelFilter); err != nil {
 			log.Fatalf("Scrape failed: %v", err)
 		}
 		log.Println("--guide-only: done")
@@ -576,6 +878,11 @@ func main() {
 	if cacheOK && xmltvMissing == nil {
 		log.Printf("Loaded guide from cache (%s old), skipping scrape", age.Round(time.Second))
 		g = cached
+		if channelFilter != nil {
+			before := len(g.Channels)
+			g = filterGuideChannels(g, channelFilter)
+			log.Printf("Channel filter: %d → %d channels (cached guide)", before, len(g.Channels))
+		}
 		// Schedule next scrape for when the cache turns 24h old
 		nextScrapeIn = 24*time.Hour - age
 		if nextScrapeIn < time.Hour {
@@ -587,7 +894,7 @@ func main() {
 		}
 		log.Println("Starting initial scrape...")
 		var err error
-		g, err = runScrape(tmdbClient, logoClient, lang, country, baseURL)
+		g, err = runScrape(tmdbClient, logoClient, lang, country, baseURL, channelFilter)
 		if err != nil {
 			log.Fatalf("Initial scrape failed: %v", err)
 		}
@@ -604,7 +911,7 @@ func main() {
 
 	// Start background scraper
 	log.Printf("Next scrape in %s", nextScrapeIn.Round(time.Minute))
-	go startScraper(ctx, state, tmdbClient, logoClient, lang, country, baseURL, nextScrapeIn)
+	go startScraper(ctx, state, tmdbClient, logoClient, lang, country, baseURL, nextScrapeIn, jellyfinURL, jellyfinAPIKey, channelFilterEnabled)
 
 	// HTTP server
 	mux := http.NewServeMux()
@@ -612,6 +919,12 @@ func main() {
 	mux.HandleFunc("/xmlguide.xmltv", handleXMLTV)
 	mux.HandleFunc("/api/guide.json", handleGuideJSON(state))
 	mux.HandleFunc("/img", handleImage)
+	mux.HandleFunc("/api/livetv/config", handleLiveTVConfig(jellyfinURL, jellyfinAPIKey))
+	if jellyfinURL != "" && jellyfinAPIKey != "" {
+		mux.HandleFunc("/api/livetv/channels", handleLiveTVChannels(jellyfinURL, jellyfinAPIKey))
+		mux.HandleFunc("/api/livetv/tune", handleLiveTVTune(jellyfinURL, jellyfinAPIKey))
+		mux.HandleFunc("/api/livetv/stop", handleLiveTVStop(jellyfinURL, jellyfinAPIKey))
+	}
 
 	srv := &http.Server{
 		Addr:    ":" + port,
