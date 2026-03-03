@@ -65,35 +65,84 @@ type Client struct {
 	pref Preferences
 }
 
+// pageSize is the maximum number of channels the Gracenote grid API
+// returns per request.  The scraper paginates using the "startchannel"
+// query parameter until a response contains fewer than pageSize channels.
+const pageSize = 100
+
 func (c *Client) GetDataByTime(t int64) (*GridResponse, error) {
 	log.Printf("headendId=%s lineupId=%s zipCode=%s", c.pref.Headend, c.pref.LineupId, c.pref.ZipCode)
 
+	var allChannels []JSONChannel
+	startChannel := 0
+
+	for {
+		grid, err := c.fetchGridPage(t, startChannel)
+		if err != nil {
+			// If we already have some channels, log the error and return
+			// what we have rather than failing the entire time slot.
+			if len(allChannels) > 0 {
+				log.Printf("Warning: pagination stopped at startchannel=%d: %v (returning %d channels so far)", startChannel, err, len(allChannels))
+				break
+			}
+			return nil, err
+		}
+
+		allChannels = append(allChannels, grid.Channels...)
+		log.Printf("Fetched %d channels (startchannel=%d, total so far=%d)", len(grid.Channels), startChannel, len(allChannels))
+
+		// If we got fewer channels than a full page, we've reached the end.
+		if len(grid.Channels) < pageSize {
+			break
+		}
+
+		startChannel += len(grid.Channels)
+
+		// Safety cap: avoid infinite loops if the API keeps returning
+		// full pages for some reason.
+		if startChannel > 2000 {
+			log.Printf("Warning: channel pagination safety cap reached at %d channels", len(allChannels))
+			break
+		}
+
+		// Brief pause between pagination requests to be polite.
+		time.Sleep(1 * time.Second)
+	}
+
+	log.Printf("Total channels for time=%d: %d", t, len(allChannels))
+	return &GridResponse{Channels: allChannels}, nil
+}
+
+// fetchGridPage retrieves a single page of grid data starting at the
+// given channel offset.
+func (c *Client) fetchGridPage(t int64, startChannel int) (*GridResponse, error) {
 	params := url.Values{
-		"aid":          {"orbebb"},
-		"lineupId":     {c.pref.LineupId},
-		"timespan":     {"6"},
-		"headendId":    {c.pref.Headend},
-		"country":      {c.pref.Country},
-		"device":       {c.pref.Device},
-		"postalCode":   {c.pref.ZipCode},
-		"isOverride":   {"true"},
-		"time":         {fmt.Sprintf("%d", t)},
-		"timezone":     {""},
-		"pref":         {"16,256"},
-		"userId":       {"-"},
-		"languagecode": {c.pref.Language},
+		"aid":            {"orbebb"},
+		"lineupId":       {c.pref.LineupId},
+		"timespan":       {"6"},
+		"headendId":      {c.pref.Headend},
+		"country":        {c.pref.Country},
+		"device":         {c.pref.Device},
+		"postalCode":     {c.pref.ZipCode},
+		"isOverride":     {"true"},
+		"time":           {fmt.Sprintf("%d", t)},
+		"timezone":       {""},
+		"pref":           {"16,256"},
+		"userId":         {"-"},
+		"languagecode":   {c.pref.Language},
+		"startchannel":   {fmt.Sprintf("%d", startChannel)},
 	}
 	gridURL := "https://tvlistings.gracenote.com/api/grid?" + params.Encode()
 	log.Printf("Fetching: %s", gridURL)
 	req, err := http.NewRequest("GET", gridURL, nil)
 	if err != nil {
-		return nil, fmt.Errorf("GetDataByTime failed to build request: %w", err)
+		return nil, fmt.Errorf("fetchGridPage failed to build request: %w", err)
 	}
 	req.Header.Set("Referer", "https://tvlistings.gracenote.com/grid-affiliates.html?aid=orbebb")
 	req.Header.Set("X-Requested-Width", "XMLHttpRequest")
 	resp, err := c.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("GetDataByTime request failed: %w", err)
+		return nil, fmt.Errorf("fetchGridPage request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
