@@ -76,7 +76,7 @@ func (c *Client) GetDataByTime(t int64) (*GridResponse, error) {
 		"country":      {c.pref.Country},
 		"device":       {c.pref.Device},
 		"postalCode":   {c.pref.ZipCode},
-		//"isOverride":   {"true"},  Appears to be an issue returns no programs when testing. 
+		"isOverride":   {"true"},
 		"time":         {fmt.Sprintf("%d", t)},
 		"timezone":     {""},
 		"pref":         {"16,256"},
